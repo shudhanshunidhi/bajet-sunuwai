@@ -1,16 +1,3 @@
-import os
-import sys
-
-# --- FOOLPROOF AUTOMATED DEPENDENCY INJECTOR ---
-# If openpyxl is missing, this runs an administrative system install directly
-try:
-    import openpyxl
-    from openpyxl import Workbook
-except ImportError:
-    os.system(f"{sys.executable} -m pip install openpyxl")
-    import openpyxl
-    from openpyxl import Workbook
-
 import streamlit as st
 import pandas as pd
 import io
@@ -49,7 +36,7 @@ col2.metric("Allocated Budget", f"NPR {total_allocated:,.2f}", delta=f"{total_al
 col3.metric("Remaining Contingency", f"NPR {remaining_budget:,.2f}", delta_color="inverse" if remaining_budget < 0 else "normal")
 
 # --- SYSTEM TABS ---
-tab1, tab2, tab3 = st.tabs(["📊 Citizen Complaint & Escalation Box", "🛠️ Engineer Dashboard & Excel Loop", "🚨 Hello Sarkar Escalations"])
+tab1, tab2, tab3 = st.tabs(["📊 Citizen Complaint & Escalation Box", "🛠️ Engineer Dashboard & Spreadsheet Loop", "🚨 Hello Sarkar Escalations"])
 
 # TAB 1: CITIZEN INPUT LAYER
 with tab1:
@@ -77,37 +64,36 @@ with tab1:
             st.success(f"🤖 AI Ingestion Agent successfully parsed grievance as High Priority. Logged as {new_id}!")
             st.rerun()
 
-# TAB 2: EXCEL INTERFACE LOOP
+# TAB 2: SPREADSHEET INTERFACE LOOP (.CSV CLEAN INTEGRATION)
 with tab2:
-    st.header("🏗️ Engineer Allocations & Bidirectional Excel Interface")
-    st.info("The Planning Engineer can inspect the AI-suggested budget, edit it manually via Microsoft Excel offline, and re-upload it.")
+    st.header("🏗️ Engineer Allocations & Bidirectional Spreadsheet Interface")
+    st.info("The Planning Engineer can inspect the AI-suggested budget, edit it manually via Microsoft Excel offline using CSV formatting, and re-upload it.")
     
     df_alloc = pd.DataFrame(st.session_state.allocations)
     st.dataframe(df_alloc, use_container_width=True)
     
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        df_alloc.to_excel(writer, index=False, sheet_name="AI_Budget_Allocation_Draft")
-    buffer.seek(0)
+    # Native string conversion for CSV download (Zero dependencies required)
+    csv_data = df_alloc.to_csv(index=False).encode('utf-8')
     
     st.download_button(
-        label="📥 Download Budget Draft to Excel (.xlsx)",
-        data=buffer,
-        file_name="bajet_sunuwai_draft.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        label="📥 Download Budget Draft for Excel (.csv)",
+        data=csv_data,
+        file_name="bajet_sunuwai_draft.csv",
+        mime="text/csv"
     )
     
     st.markdown("---")
     st.subheader("🔄 Re-upload Revised Spreadsheet (Human-In-The-Loop Override)")
-    uploaded_file = st.file_uploader("Choose the modified Excel file to instantly recalculate citizen notification matrices:", type=["xlsx"])
+    uploaded_file = st.file_uploader("Choose the modified spreadsheet file to instantly recalculate citizen notification matrices:", type=["csv"])
     if uploaded_file is not None:
         try:
-            uploaded_df = pd.read_excel(uploaded_file, engine='openpyxl')
+            # Safe native parsing
+            uploaded_df = pd.read_csv(uploaded_file)
             st.session_state.allocations = uploaded_df.to_dict(orient="records")
             st.success("✅ Financial allocations synchronized with Engineer's adjustments! Citizen SMS pipelines triggered.")
             st.rerun()
         except Exception as e:
-            st.error(f"Error parsing file: {e}")
+            st.error(f"Error parsing spreadsheet layout: {e}")
 
 # TAB 3: ACCOUNTABILITY MATRIX
 with tab3:
