@@ -353,34 +353,46 @@ def render_public_portal():
                         st.write(f"**Municipal Note:** {c['admin_response']}")
 
                 # --- Hello Sarkar Escalation Safeguard ---
-                unresolved_and_unfavorable = c["funded"] is False or c["status"] == "Pending Review"
-                if c["days_unresolved"] >= 7 and unresolved_and_unfavorable:
+                # Any complaint that did NOT succeed (rejected/deferred) can be
+                # forwarded to Hello Sarkar. If it's also been unresolved for
+                # 7+ days, the messaging is upgraded to a stronger warning.
+                not_succeeded = c["funded"] is False
+                if not_succeeded:
                     st.markdown("---")
                     if c["escalated"]:
                         st.error(
-                            "🚨 This complaint has already been escalated to the "
+                            "🚨 This complaint has already been forwarded to the "
                             "**Central Hello Sarkar Prime Minister's Dashboard**."
                         )
                     else:
-                        st.warning(
-                            "⚠️ This complaint has been unresolved for "
-                            f"{c['days_unresolved']} days and was not funded."
-                        )
+                        if c["days_unresolved"] >= 7:
+                            st.warning(
+                                "⚠️ This complaint was **not successful** and has been "
+                                f"unresolved for {c['days_unresolved']} days — eligible "
+                                "for priority escalation."
+                            )
+                        else:
+                            st.warning(
+                                "⚠️ This complaint was **not successful** "
+                                "(REJECTED / DEFERRED). You may forward it directly "
+                                "to Hello Sarkar for central review."
+                            )
+
                         if st.button(
-                            f"🚨 Escalate {c['id']} to Hello Sarkar PM Dashboard",
+                            f"📤 Share {c['id']} to Hello Sarkar",
                             key=f"escalate_{c['id']}",
                             type="primary",
                         ):
                             c["escalated"] = True
                             st.session_state.logs.append(
-                                f"[ESCALATION] {c['id']} pushed to Central Hello Sarkar "
+                                f"[ESCALATION] {c['id']} forwarded to Central Hello Sarkar "
                                 f"PM Dashboard — data packet, local budget caps, and "
                                 f"multi-year failure logs transmitted."
                             )
                             st.success(
-                                f"📡 Data packet for {c['id']} — including local budget "
-                                f"caps and multi-year failure logs — has been transmitted "
-                                f"to the Central Hello Sarkar Prime Minister's Dashboard."
+                                f"📡 {c['id']} has been forwarded to the Central Hello "
+                                f"Sarkar Prime Minister's Dashboard — including local "
+                                f"budget caps and multi-year failure logs."
                             )
                             st.rerun()
 
