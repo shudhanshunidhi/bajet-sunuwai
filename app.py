@@ -1,8 +1,19 @@
+import os
+import sys
+
+# --- FOOLPROOF AUTOMATED DEPENDENCY INJECTOR ---
+# If openpyxl is missing, this runs an administrative system install directly
+try:
+    import openpyxl
+    from openpyxl import Workbook
+except ImportError:
+    os.system(f"{sys.executable} -m pip install openpyxl")
+    import openpyxl
+    from openpyxl import Workbook
+
 import streamlit as st
 import pandas as pd
 import io
-import openpyxl  
-from openpyxl import Workbook
 
 # --- PAGE CONFIGURATION & THEME ---
 st.set_page_config(page_title="Bajet Sunuwai AI Portal", layout="wide", page_icon="🇳🇵")
@@ -42,7 +53,7 @@ tab1, tab2, tab3 = st.tabs(["📊 Citizen Complaint & Escalation Box", "🛠️ 
 
 # TAB 1: CITIZEN INPUT LAYER
 with tab1:
-    st.header("📥 Ingested Local Grivances (Google Forms & Ward Boxes)")
+    st.header("📥 Ingested Local Grievances (Google Forms & Ward Boxes)")
     st.write("Our Translation and Sentiment Agents automatically cluster multilingual text submissions into urgency metrics.")
     
     df_complaints = pd.DataFrame(st.session_state.complaints)
