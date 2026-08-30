@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 import io
-
+import openpyxl  # <--- FORCES STREAMLIT CORE TO REGULATE THE MODULE INITIALIZATION
+from openpyxl import Workbook  # <--- ACCELERATES ENGINE DISCOVERY FOR PANDAS
 # --- PAGE CONFIGURATION & THEME ---
 st.set_page_config(page_title="Bajet Sunuwai AI Portal", layout="wide", page_icon="🇳🇵")
 
