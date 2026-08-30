@@ -1,8 +1,19 @@
+import subprocess
+import sys
+
+# --- DYNAMIC DEPENDENCY INSTALLER BYPASS ---
+# This forces Streamlit Cloud to download openpyxl even if requirement.txt.txt is misread
+try:
+    import openpyxl
+    from openpyxl import Workbook
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
+    import openpyxl
+    from openpyxl import Workbook
+
 import streamlit as st
 import pandas as pd
 import io
-import openpyxl  # Forces engine detection on cloud servers
-from openpyxl import Workbook
 
 # --- PAGE CONFIGURATION & THEME ---
 st.set_page_config(page_title="Bajet Sunuwai AI Portal", layout="wide", page_icon="🇳🇵")
@@ -11,7 +22,6 @@ st.set_page_config(page_title="Bajet Sunuwai AI Portal", layout="wide", page_ico
 if 'budget_pool' not in st.session_state:
     st.session_state.budget_pool = 50000000  # Total 5 Crore NPR available
 if 'complaints' not in st.session_state:
-    # Seed data representing local Nepali/Maithili complaints & history
     st.session_state.complaints = [
         {"ID": "CMP-001", "Ward": "Ward 3", "Sector": "Water", "Language": "Maithili", "Text": "कल गढबढ अछि, पानि नै आबैए।", "Priority": "🔴 High", "Status": "Recurring (Escalated)"},
         {"ID": "CMP-002", "Ward": "Ward 1", "Sector": "Roads", "Language": "Nepali", "Text": "पिच बाटो खनेर अलकत्रा हालेकै छैन, धुलो उड्यो।", "Priority": "🔴 High", "Status": "Budget-Linked"},
@@ -19,7 +29,6 @@ if 'complaints' not in st.session_state:
         {"ID": "CMP-004", "Ward": "Ward 3", "Sector": "Water", "Language": "Maithili", "Text": "इनार सुखि गेल छै, पीने वाला पानी नै छै।", "Priority": "🔴 High", "Status": "Recurring (Escalated)"},
     ]
 if 'allocations' not in st.session_state:
-    # AI generated initial allocations
     st.session_state.allocations = [
         {"Project Name": "Ward 1 Primary Road Pitch Repair", "Ward": "Ward 1", "Sector": "Roads", "AI Allocated (NPR)": 15000000, "Justification": "Matches High-Urgency Road Complaint Cluster"},
         {"Project Name": "Ward 3 Deep Tube-well Installation", "Ward": "Ward 3", "Sector": "Water", "AI Allocated (NPR)": 8000000, "Justification": "Fixes 2 Recurring Water Crisis Complaints"},
@@ -47,7 +56,6 @@ with tab1:
     st.header("📥 Ingested Local Grievances (Google Forms & Ward Boxes)")
     st.write("Our Translation and Sentiment Agents automatically cluster multilingual text submissions into urgency metrics.")
     
-    # Render interactive DataFrame
     df_complaints = pd.DataFrame(st.session_state.complaints)
     st.dataframe(df_complaints, use_container_width=True)
     
@@ -62,7 +70,6 @@ with tab1:
         submitted = st.form_submit_button("Submit to Bajet Sunuwai System")
         
         if submitted and c_text:
-            # Mock Agent Processing
             new_id = f"CMP-00{len(st.session_state.complaints) + 1}"
             st.session_state.complaints.append({
                 "ID": new_id, "Ward": c_ward, "Sector": c_sector, "Language": c_lang, "Text": c_text, "Priority": "🔴 High", "Status": "Filed"
@@ -78,7 +85,6 @@ with tab2:
     df_alloc = pd.DataFrame(st.session_state.allocations)
     st.dataframe(df_alloc, use_container_width=True)
     
-    # Export to Excel Action using safe context execution
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         df_alloc.to_excel(writer, index=False, sheet_name="AI_Budget_Allocation_Draft")
