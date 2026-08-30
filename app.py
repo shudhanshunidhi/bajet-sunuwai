@@ -13,6 +13,7 @@ import io
 import random
 import string
 from datetime import datetime, timedelta
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
@@ -150,6 +151,8 @@ def seed_complaint(cid, ward, sector, language, text, days_unresolved):
         "admin_response": "",
         "override_include": "Yes",
         "escalated": False,
+        "photo_bytes": None,
+        "photo_name": None,
     }
 
 
@@ -250,6 +253,101 @@ def fmt_npr(amount):
     return f"NPR {amount:,.0f}"
 
 
+HELLO_SARKAR_PORTAL_URL = "https://gunaso.opmcm.gov.np/home"
+HELLO_SARKAR_WHATSAPP_NUMBER = "9779851145045"  # +977 985-1145045
+
+
+def render_hello_sarkar_redirect(c):
+    """
+    Show the prepared complaint packet plus two real forwarding routes:
+      1. The official Hello Sarkar grievance portal (gunaso.opmcm.gov.np).
+      2. A WhatsApp click-to-chat link to Hello Sarkar's published number
+         (+977 985-1145045), pre-filled with the full complaint text.
+
+    Neither Hello Sarkar's portal nor WhatsApp's click-to-chat links support
+    auto-attaching a photo — that's a platform limitation, not something this
+    app can bypass — so if the citizen attached a photo, it's shown here with
+    a clear instruction to attach it manually inside the WhatsApp chat before
+    sending.
+    """
+    st.markdown("##### 📦 Prepared Complaint Packet (copy into Hello Sarkar)")
+    packet = (
+        f"Tracking ID: {c['id']}\n"
+        f"Municipality: Nagarain Municipality, Dhanusa, Madhesh Province\n"
+        f"Ward: {c['ward']}\n"
+        f"Sector: {c['sector']}\n"
+        f"Language: {c['language']}\n"
+        f"Days Unresolved: {c['days_unresolved']}\n"
+        f"Original Complaint: {c['text']}\n"
+        f"Municipal Outcome: REJECTED / DEFERRED\n"
+        f"AI / Municipal Reason: {c['ai_reason'] or 'Not provided'}\n"
+    )
+    st.code(packet, language="text")
+
+    if c.get("photo_bytes"):
+        st.markdown("##### 📷 Attached Photo")
+        st.image(c["photo_bytes"], caption=c.get("photo_name", "complaint_photo"), width=280)
+        st.caption(
+            "⚠️ WhatsApp and the Hello Sarkar portal can't pull this photo in "
+            "automatically — attach it manually in the chat / upload form "
+            "after opening the link below."
+        )
+
+    whatsapp_text = quote(
+        f"Hello Sarkar Complaint Forward — Bajet Sunuwai\n\n{packet}"
+    )
+    whatsapp_url = f"https://wa.me/{HELLO_SARKAR_WHATSAPP_NUMBER}?text={whatsapp_text}"
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown(
+            f"""
+            <a href="{whatsapp_url}" target="_blank">
+                <button style="
+                    background-color:#25703f;
+                    color:#f2efe8;
+                    border:none;
+                    padding:10px 18px;
+                    border-radius:8px;
+                    font-weight:600;
+                    cursor:pointer;
+                    width:100%;">
+                    💬 Send via WhatsApp to Hello Sarkar (+977 985-1145045)
+                </button>
+            </a>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_b:
+        st.markdown(
+            f"""
+            <a href="{HELLO_SARKAR_PORTAL_URL}" target="_blank">
+                <button style="
+                    background-color:#8c2f22;
+                    color:#f2efe8;
+                    border:none;
+                    padding:10px 18px;
+                    border-radius:8px;
+                    font-weight:600;
+                    cursor:pointer;
+                    width:100%;">
+                    🔗 Open Hello Sarkar Portal
+                </button>
+            </a>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.caption(
+        "The WhatsApp button opens a chat with Hello Sarkar's published "
+        "number with the complaint text already filled in — just attach the "
+        "photo above (if any) and hit send. The portal button opens the "
+        "official gunaso.opmcm.gov.np grievance form for the same packet. "
+        "Neither route supports pre-filling via a photo attachment "
+        "automatically; that step stays manual on both platforms."
+    )
+
+
 # --------------------------------------------------------------------------
 # PUBLIC CITIZEN PORTAL
 # --------------------------------------------------------------------------
@@ -279,6 +377,11 @@ def render_public_portal():
                 placeholder="Type in Nepali, Maithili, or Bhojpuri...",
                 height=120,
             )
+            photo = st.file_uploader(
+                "Attach a photo (optional)",
+                type=["jpg", "jpeg", "png"],
+                key="citizen_photo_upload",
+            )
             submitted = st.form_submit_button("📤 Submit to AI Ingestion Agent", type="primary")
 
         if submitted:
@@ -287,6 +390,9 @@ def render_public_portal():
             else:
                 new_id = next_complaint_id()
                 complaint = seed_complaint(new_id, ward, sector, language, text.strip(), 0)
+                if photo is not None:
+                    complaint["photo_bytes"] = photo.getvalue()
+                    complaint["photo_name"] = photo.name
                 st.session_state.complaints.append(complaint)
                 st.success(
                     f"✅ AI Ingestion Agent processed your entry.\n\n"
@@ -324,6 +430,9 @@ def render_public_portal():
                 """,
                 unsafe_allow_html=True,
             )
+
+            if c.get("photo_bytes"):
+                st.image(c["photo_bytes"], caption=c.get("photo_name", "attached photo"), width=220)
 
             if not st.session_state.budget_published:
                 st.info(
@@ -364,6 +473,7 @@ def render_public_portal():
                             "🚨 This complaint has already been forwarded to the "
                             "**Central Hello Sarkar Prime Minister's Dashboard**."
                         )
+                        render_hello_sarkar_redirect(c)
                     else:
                         if c["days_unresolved"] >= 7:
                             st.warning(
@@ -388,11 +498,6 @@ def render_public_portal():
                                 f"[ESCALATION] {c['id']} forwarded to Central Hello Sarkar "
                                 f"PM Dashboard — data packet, local budget caps, and "
                                 f"multi-year failure logs transmitted."
-                            )
-                            st.success(
-                                f"📡 {c['id']} has been forwarded to the Central Hello "
-                                f"Sarkar Prime Minister's Dashboard — including local "
-                                f"budget caps and multi-year failure logs."
                             )
                             st.rerun()
 
