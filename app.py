@@ -1,148 +1,144 @@
 import streamlit as st
 import pandas as pd
 import io
+import os
+import sys
 
-# --- PAGE CONFIGURATION & THEME ---
-st.set_page_config(page_title="Bajet Sunuwai AI Portal", layout="wide", page_icon="🇳🇵")
+# --- FOOLPROOF INLINE EXCEL INSTALLER ---
+# Ensures the .xlsx generation runs perfectly on Streamlit Cloud without setup crashes
+try:
+    import openpyxl
+    from openpyxl import Workbook
+except ImportError:
+    os.system(f"{sys.executable} -m pip install openpyxl")
+    try:
+        import openpyxl
+    except Exception:
+        pass
 
-# --- INITIALIZE DB STATE (In-Memory Session Database) ---
+# --- PAGE CONFIGURATION & THEME STYLING ---
+st.set_page_config(
+    page_title="Bajet Sunuwai — Digital Local Governance Platform", 
+    layout="wide", 
+    page_icon="🇳🇵"
+)
+
+# Custom Clean CSS Styling for Hackathon Aesthetics
+st.markdown("""
+    <style>
+    .main-title { font-size: 2.4rem; font-weight: 800; color: #1E3A8A; margin-bottom: 0.2rem; }
+    .subtitle { font-size: 1.1rem; color: #4B5563; margin-bottom: 1.5rem; }
+    .section-header { font-size: 1.5rem; font-weight: 700; color: #0F172A; margin-top: 1rem; margin-bottom: 0.8rem; border-left: 5px solid #2563EB; padding-left: 10px; }
+    .card { background-color: #F8FAFC; padding: 20px; border-radius: 10px; border: 1px solid #E2E8F0; margin-bottom: 15px; }
+    .badge-high { background-color: #FEE2E2; color: #991B1B; padding: 4px 8px; border-radius: 5px; font-weight: bold; font-size: 0.8rem; }
+    .badge-status { background-color: #DBEAFE; color: #1E40AF; padding: 4px 8px; border-radius: 5px; font-weight: bold; font-size: 0.8rem; }
+    </style>
+""", unsafe_with_html=True)
+
+# --- INITIALIZE SECURE STATE DATABASE ---
 if 'central_grant' not in st.session_state:
     st.session_state.central_grant = 25000000.0
 if 'provincial_grant' not in st.session_state:
     st.session_state.provincial_grant = 15000000.0
 if 'internal_revenue' not in st.session_state:
     st.session_state.internal_revenue = 10000000.0
-
 if 'ai_focus_prompt' not in st.session_state:
-    st.session_state.ai_focus_prompt = "Focus heavily on agricultural structural setups, climate resilience for monsoon flooding patterns typical of Madhesh geographic terrains, and primary school rehabilitation."
-
-if 'uploaded_docs' not in st.session_state:
-    st.session_state.uploaded_docs = [
-        {"Filename": "Yuba_Club_Dhyanakarshan.txt", "Type": "Youth Club Demand Letter", "Extracted Needs": "Requesting 5 Lakhs for Ward 3 community playground fencing."},
-        {"Filename": "Political_Joint_Memorandum.txt", "Type": "Inter-party Request", "Extracted Needs": "Demanding blacktopping of the connecting highway corridor in Ward 1."}
-    ]
+    st.session_state.ai_focus_prompt = "Prioritize agricultural structural setups, climate resilience for monsoon flooding patterns typical of Madhesh geographic terrains, and secondary road corridor network connections."
 
 if 'complaints' not in st.session_state:
     st.session_state.complaints = [
-        {"ID": "CMP-001", "Ward": "Ward 3", "Sector": "Water/Agriculture", "Language": "Maithili", "Text": "कल गढबढ अछि, पानि नै आबैए। सिचाई ठप्प अछि।", "Priority": "🔴 High", "Status": "Pending AI Review", "Notification": "No Alert Sent"},
-        {"ID": "CMP-002", "Ward": "Ward 1", "Sector": "Roads", "Language": "Nepali", "Text": "पिच बाटो खनेर अलकत्रा हालेकै छैन, असाध्यै धुलो उड्यो।", "Priority": "🔴 High", "Status": "Pending AI Review", "Notification": "No Alert Sent"},
-        {"ID": "CMP-003", "Ward": "Ward 4", "Sector": "Irrigation", "Language": "Nepali", "Text": "बाढीले कुलो बगायो, खेत सुख्खा भयो।", "Priority": "🔴 High", "Status": "Pending AI Review", "Notification": "No Alert Sent"}
+        {"ID": "CMP-101", "Ward": "Ward 3", "Sector": "Water & Sanitation", "Language": "Maithili", "Text": "कल गढबढ अछि, पानि नै आबैए। स्वच्छ पीबयबला पानि के समस्या भेल अछि।", "Priority": "🔴 High Priority", "Status": "Pending Review", "Official Response": "", "Budget Linked": "No", "Days Unresolved": 8},
+        {"ID": "CMP-102", "Ward": "Ward 1", "Sector": "Road Infrastructure", "Language": "Nepali", "Text": "पिच बाटो खनेर अलकत्रा हालेकै छैन, जताततै धुलो उडेर बुढाबुढी र बच्चाहरु बिरामी परे।", "Priority": "🔴 High Priority", "Status": "Pending Review", "Official Response": "", "Budget Linked": "No", "Days Unresolved": 9},
+        {"ID": "CMP-103", "Ward": "Ward 4", "Sector": "Agriculture & Irrigation", "Language": "Nepali", "Text": "मनसुनको बाढीले सिचाई कुलो बगायो, धान बाली सुक्न लाग्यो। पुनर्निर्माण छिटो गरियोस्।", "Priority": "🔴 High Priority", "Status": "Pending Review", "Official Response": "", "Budget Linked": "No", "Days Unresolved": 2}
+    ]
+
+if 'uploaded_docs' not in st.session_state:
+    st.session_state.uploaded_docs = [
+        {"Source": "Local Tole Bikas Samiti", "Type": "Dhyanakarshan Letter", "Details": "Demanding NPR 5,00,000 for local public park preservation and perimeter wire fence construction."},
+        {"Source": "Joint Political Committee", "Type": "Memorandum", "Details": "Urging allocation for blacktopping the primary connecting market corridor in Ward 1."}
     ]
 
 if 'allocations' not in st.session_state:
     st.session_state.allocations = []
+if 'budget_published' not in st.session_state:
+    st.session_state.budget_published = False
 
-# --- APP HEADER ---
-st.title("🇳🇵 Bajet Sunuwai (बजेट सुनुवाई) — Smart AI Agentic Budget Engine")
-st.caption("Closing the Accountability Gap: Integrating Civic Grievances, Dhyanakarshan Letters, and Regional Needs into AI-Driven Budgets.")
+# --- BRANDING LAYER ---
+st.markdown('<div class="main-title">🇳🇵 Bajet Sunuwai (बजेट सुनुवाई)</div>', unsafe_with_html=True)
+st.markdown('<div class="subtitle">An Agentic AI Civic Accountability Framework Connecting Local Public Feedback Closures directly to Municipal Capital Allocations.</div>', unsafe_with_html=True)
 
-# --- SIDEBAR: OFFICIAL MUNICIPAL REVENUE INPUTS & AI INSTRUCTIONS ---
-with st.sidebar:
-    st.header("⚙️ Local Level Fiscal Setup")
-    st.write("Authorized officials can update real financial ceilings here:")
+# --- SYSTEM EXPERIENCE SEGREGATION (Clean User Tabs) ---
+app_view = st.sidebar.radio("🌐 Select Portal View", ["👤 Public Citizen Portal", "🏢 Municipal Admin Operations Room"])
+
+# ==========================================
+# 👤 USER VIEW 1: PUBLIC CITIZEN INTERFACE
+# ==========================================
+if app_view == "👤 Public Citizen Portal":
+    st.markdown('<div class="section-header">📥 Public Budget Feedback & Grievance Submission Box</div>', unsafe_with_html=True)
+    st.write("Wards and Municipal Offices are actively requesting policy inputs (*Bajet Niti Karyakram Sambandhi Sujhav Sankalan*). Submit your infrastructure problems or policy recommendations in natural text below.")
     
-    st.session_state.central_grant = st.number_input("Central/Federal Fiscal Grant (NPR)", value=st.session_state.central_grant, step=500000.0)
-    st.session_state.provincial_grant = st.number_input("Provincial Fiscal Grant (NPR)", value=st.session_state.provincial_grant, step=500000.0)
-    st.session_state.internal_revenue = st.number_input("Internal/Own Source Revenue (NPR)", value=st.session_state.internal_revenue, step=100000.0)
+    col_entry, col_status = st.columns([1, 1.2])
     
+    with col_entry:
+        st.markdown('<div class="card">', unsafe_with_html=True)
+        st.subheader("Submit Request / Sujhav")
+        with st.form("citizen_input_form", clear_on_submit=True):
+            citizen_ward = st.selectbox("Your Target Ward Location", ["Ward 1", "Ward 2", "Ward 3", "Ward 4", "Ward 5"])
+            citizen_sector = st.selectbox("Infrastructure / Development Sector", ["Road Infrastructure", "Water & Sanitation", "Agriculture & Irrigation", "Health Services", "Education & Sports"])
+            citizen_lang = st.selectbox("Submission Language", ["Nepali", "Maithili", "Bhojpuri", "English"])
+            citizen_text = st.text_area("Write your grievance, requirement, or budget suggestion in detail:", height=120)
+            
+            submit_btn = st.form_submit_button("Lock Submission to Municipal Core")
+            if submit_btn and citizen_text:
+                new_id = f"CMP-{len(st.session_state.complaints) + 101}"
+                st.session_state.complaints.append({
+                    "ID": new_id, "Ward": citizen_ward, "Sector": citizen_sector, "Language": citizen_lang, "Text": citizen_text, "Priority": "🔴 High Priority", "Status": "Pending Review", "Official Response": "", "Budget Linked": "No", "Days Unresolved": 0
+                })
+                st.success(f"🤖 AI Ingestion Agent parsed and synchronized your submission successfully. Track ID: **{new_id}**")
+        st.markdown('</div>', unsafe_with_html=True)
+
+    with col_status:
+        st.subheader("📡 Live Transparency & Tracking Matrix")
+        st.write("All submitted public feedback is automatically updated below as the official budget is compiled.")
+        
+        for c in st.session_state.complaints:
+            with st.expander(f"📋 {c['ID']} — {c['Ward']} [{c['Sector']}]"):
+                st.write(f"**Your Text Entry:** {c['Text']}")
+                st.write(f"**Processing Status:** `{c['Status']}`")
+                
+                if st.session_state.budget_published:
+                    if c["Budget Linked"] == "Yes":
+                        st.success(f"✅ **Budget Allocation Status:** SUCCESS. Money has been reserved for this project line. {c['Official Response']}")
+                    else:
+                        st.error(f"❌ **Budget Allocation Status:** REJECTED / DEFERRED. {c['Official Response']}")
+                        
+                        # Hello Sarkar Escalation Safeguard (Only active if unanswered for > 7 Days)
+                        if c["Days Unresolved"] >= 7:
+                            st.markdown(f"⚠️ *This critical problem was submitted over **{c['Days Unresolved']} days ago** without resolution or sufficient funding allocations.*")
+                            if st.button(f"🚨 Escalate {c['ID']} to Hello Sarkar Portal", key=f"user_esc_{c['ID']}"):
+                                st.toast(f"Pushed {c['ID']} tracking package directly to the Central Prime Minister's Dashboard via Hello Sarkar Webhook connection simulation!", icon="📡")
+                else:
+                    st.info("⌛ The municipal assembly is currently designing the budget draft using this feedback dataset. A notification update will deploy immediately upon final publication.")
+
+# ==========================================
+# 🏢 USER VIEW 2: MUNICIPAL OPERATIONS ROOM
+# ==========================================
+else:
+    st.markdown('<div class="section-header">🏢 Municipal Planning Control Center</div>', unsafe_with_html=True)
+    st.write("Secure internal console for the Mayor, Ward Chairs, and Technical Municipal Engineers to process funding ceilings and generate layouts.")
+    
+    # DYNAMIC FISCAL STATS CARD
     total_budget_pool = st.session_state.central_grant + st.session_state.provincial_grant + st.session_state.internal_revenue
-    
-    st.markdown("---")
-    st.header("🤖 Mayor's AI Policy Prompter")
-    st.session_state.ai_focus_prompt = st.text_area(
-        "Enter overall structural vision or geographical rules (e.g., climate, agriculture, master plans):", 
-        value=st.session_state.ai_focus_prompt
-    )
+    total_allocated = sum(item["Allocated Amount (NPR)"] for item in st.session_state.allocations) if st.session_state.allocations else 0.0
+    remaining_reserve = total_budget_pool - total_allocated
 
-# --- RE-CALCULATE DYNAMIC BALANCES ---
-total_allocated = sum(item["Allocated Amount (NPR)"] for item in st.session_state.allocations) if st.session_state.allocations else 0.0
-remaining_contingency = total_budget_pool - total_allocated
+    stat_col1, stat_col2, stat_col3 = st.columns(3)
+    stat_col1.metric("Revenue Ceiling (Total Pool)", f"NPR {total_budget_pool:,.2f}", help="Central Grants + Provincial Grants + Internal Revenue inputs")
+    stat_col2.metric("Allocated Project Expenditure", f"NPR {total_allocated:,.2f}", delta=f"{(total_allocated/total_budget_pool*100 if total_budget_pool > 0 else 0):.1f}% Budget Utilization")
+    stat_col3.metric("Remaining Unallocated Reserve", f"NPR {remaining_reserve:,.2f}", delta_color="inverse" if remaining_reserve < 0 else "normal")
 
-# --- LIVE STATS BAR ---
-col1, col2, col3 = st.columns(3)
-col1.metric("Dynamic Budget Ceiling", f"NPR {total_budget_pool:,.2f}", help="Sum of Central + Provincial + Internal Revenue inputs")
-col2.metric("Allocated Draft Total", f"NPR {total_allocated:,.2f}", delta=f"{(total_allocated/total_budget_pool*100 if total_budget_pool > 0 else 0):.1f}% Utilization")
-col3.metric("Unallocated Reserve", f"NPR {remaining_contingency:,.2f}", delta_color="inverse" if remaining_contingency < 0 else "normal")
-
-# --- SYSTEM TABS ---
-tab1, tab2, tab3 = st.tabs(["📊 Ingestion Console (Complaints & Dhyanakarshan)", "🧠 AI Budget Core Generator", "📡 Citizen Feedback & Hello Sarkar Router"])
-
-# TAB 1: DATA INGESTION (COMPLAINTS & MEMORANDUMS)
-with tab1:
-    st.header("📥 Multi-Channel Local Document Ingestion Hub")
-    
-    left_col, right_col = st.columns(2)
-    
-    with left_col:
-        st.subheader("📬 Live Public Grievance Database")
-        st.dataframe(pd.DataFrame(st.session_state.complaints)[["ID", "Ward", "Sector", "Text", "Priority"]], use_container_width=True)
-        
-        st.markdown("**Simulate New Public Submission Box Entry:**")
-        with st.form("new_complaint_form"):
-            w = st.selectbox("Ward", ["Ward 1", "Ward 2", "Ward 3", "Ward 4", "Ward 5"])
-            s = st.selectbox("Category", ["Water/Agriculture", "Roads", "Irrigation", "Health", "Education"])
-            t = st.text_area("Grievance (Nepali/Maithili Input)")
-            if st.form_submit_button("Log Complaint"):
-                if t:
-                    st.session_state.complaints.append({
-                        "ID": f"CMP-00{len(st.session_state.complaints)+1}", "Ward": w, "Sector": s, "Language": "Local Dialect", "Text": t, "Priority": "🔴 High", "Status": "Pending AI Review", "Notification": "No Alert Sent"
-                    })
-                    st.success("Grievance mapped and indexed dynamically!")
-                    st.rerun()
-
-    with right_col:
-        st.subheader("📄 Dhyanakarshan Letters & Memorandums")
-        st.write("Upload official letters submitted by community clubs or political committees directly to the Mayor's office.")
-        
-        uploaded_file = st.file_uploader("Upload Memorandum / Demand Document (Simulated File Reader)", type=["txt", "pdf", "docx"])
-        if uploaded_file is not None:
-            new_doc = {"Filename": uploaded_file.name, "Type": "Official Memorandum", "Extracted Needs": "Extracted requests targeting local road expansion and school infrastructure benchmarks."}
-            st.session_state.uploaded_docs.append(new_doc)
-            st.success(f"🤖 AI Document Parser scanned '{uploaded_file.name}' successfully and mapped requirements.")
-            
-        st.dataframe(pd.DataFrame(st.session_state.uploaded_docs), use_container_width=True)
-
-# TAB 2: AI DRAFT CORE & EXCEL OVERRIDES
-with tab2:
-    st.header("🧠 Agentic AI Budget Calculation Engine")
-    st.write("Click below to prompt the AI to process the geographic climate vulnerabilities, the typed revenue parameters, your specific directives, and raw complaint clusters into a balanced spreadsheet draft.")
-    
-    if st.button("🚀 Compile and Run AI Budget Allocation Engine"):
-        with st.spinner("Analyzing regional monsoon rain parameters, cross-checking 2 Dhyanakarshan letters, and prioritizing high-density grievance sectors..."):
-            st.session_state.allocations = [
-                {"Project Name": "Ward 4 Agricultural Canal Concrete Repair", "Ward": "Ward 4", "Sector": "Irrigation", "Allocated Amount (NPR)": 18000000.0, "AI Logic Blueprint": "Prioritized due to High Rain/Monsoon threat data in Madhesh terrain + matches CMP-003 baseline grievance perfectly."},
-                {"Project Name": "Ward 1 Connecting Corridor Tarring and Drainage", "Ward": "Ward 1", "Sector": "Roads", "Allocated Amount (NPR)": 20000000.0, "AI Logic Blueprint": "Fulfills Inter-Party Dhyanakarshan request and solves high-density dusty environment logs listed in CMP-002."},
-                {"Project Name": "Ward 3 Deep Tube-Well Clean Water Array", "Ward": "Ward 3", "Sector": "Water/Agriculture", "Allocated Amount (NPR)": 7000000.0, "AI Logic Blueprint": "Direct mitigation for Ward 3 water scarcity complaint cluster (CMP-001)."},
-                {"Project Name": "Emergency Disaster & Climate Relief Reserves", "Ward": "All", "Sector": "Contingency", "Allocated Amount (NPR)": 5000000.0, "AI Logic Blueprint": "Required contingency buffering mandated by Mayor's climate-focus directive input fields."}
-            ]
-            
-            for c in st.session_state.complaints:
-                c["Status"] = "SUCCESS (Budget Allocated)"
-                c["Notification"] = "SMS Dispatched: Funded"
-            
-            st.success("✅ AI Draft Compiled! Review the structured breakdown below:")
-            st.rerun()
-
-    if st.session_state.allocations:
-        df_alloc = pd.DataFrame(st.session_state.allocations)
-        st.dataframe(df_alloc, use_container_width=True)
-        
-        csv_data = df_alloc.to_csv(index=False).encode('utf-8')
-        st.download_button(label="📥 Export AI Draft to Excel/CSV", data=csv_data, file_name="ai_bajet_sunuwai_draft.csv", mime="text/csv")
-        
-        st.markdown("---")
-        st.subheader("🔧 Manual Planning Engineer Modification Layer")
-        uploaded_csv = st.file_uploader("Upload Modified Spreadsheet to Override AI Draft (Human-in-the-Loop Safeguard)", type=["csv"])
-        if uploaded_csv is not None:
-            try:
-                st.session_state.allocations = pd.read_csv(uploaded_csv).to_dict(orient="records")
-                st.success("System database overwritten with verified technical modifications successfully.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error parsing uploaded file: {e}")
-    else:
-        st.info("The AI budget sheet has not been compiled yet. Set your rules and click the engine trigger button above.")
-
-# TAB 3: ACCOUNTABILITY MATRIX & CENTRAL GOVERNMENT ESCALATION ROUTER
-with tab3:
-    st.header("📡 Closed-Loop Feedback Registry & Hello Sarkar Router")
+    # OPERATIONAL SETTINGS MATRIX
+    with st.expander("⚙️ Step 1: Manage Financial Revenues & Policy Prompts", expanded=False):
+        f_col1, f_col2, f_col3 = st.columns(3)
+        st.session_state.central_grant = f_col1.number_input("Federal Equalization & Conditional Grants (NPR)", value=st.session_state.central_grant, step=100000.0)
+        st.session_state.provincial_grant = f_col2.number_input("Provincial Grants (NPR)", value=st.session_state.provincial_grant, step=100000.0)
