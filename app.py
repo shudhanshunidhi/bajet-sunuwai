@@ -41,7 +41,6 @@ with st.sidebar:
     st.header("⚙️ Local Level Fiscal Setup")
     st.write("Authorized officials can update real financial ceilings here:")
     
-    # Live User Editable Financial Pools
     st.session_state.central_grant = st.number_input("Central/Federal Fiscal Grant (NPR)", value=st.session_state.central_grant, step=500000.0)
     st.session_state.provincial_grant = st.number_input("Provincial Fiscal Grant (NPR)", value=st.session_state.provincial_grant, step=500000.0)
     st.session_state.internal_revenue = st.number_input("Internal/Own Source Revenue (NPR)", value=st.session_state.internal_revenue, step=100000.0)
@@ -66,7 +65,7 @@ col2.metric("Allocated Draft Total", f"NPR {total_allocated:,.2f}", delta=f"{(to
 col3.metric("Unallocated Reserve", f"NPR {remaining_contingency:,.2f}", delta_color="inverse" if remaining_contingency < 0 else "normal")
 
 # --- SYSTEM TABS ---
-tab1, tab2, tab3 = st.tabs(["📝 Ingestion Console (Complaints & Dhyanakarshan)", "🤖 AI Budget Core Generator", "📡 Citizen Feedback Loop & Hello Sarkar Router"])
+tab1, tab2, tab3 = st.tabs(["📊 Ingestion Console (Complaints & Dhyanakarshan)", "🧠 AI Budget Core Generator", "📡 Citizen Feedback & Hello Sarkar Router"])
 
 # TAB 1: DATA INGESTION (COMPLAINTS & MEMORANDUMS)
 with tab1:
@@ -81,7 +80,7 @@ with tab1:
         st.markdown("**Simulate New Public Submission Box Entry:**")
         with st.form("new_complaint_form"):
             w = st.selectbox("Ward", ["Ward 1", "Ward 2", "Ward 3", "Ward 4", "Ward 5"])
-            s = st.selectbox("Category", ["Water/Agriculture", "Roads", "Irrigation", "Education", "Health"])
+            s = st.selectbox("Category", ["Water/Agriculture", "Roads", "Irrigation", "Health", "Education"])
             t = st.text_area("Grievance (Nepali/Maithili Input)")
             if st.form_submit_button("Log Complaint"):
                 if t:
@@ -97,7 +96,6 @@ with tab1:
         
         uploaded_file = st.file_uploader("Upload Memorandum / Demand Document (Simulated File Reader)", type=["txt", "pdf", "docx"])
         if uploaded_file is not None:
-            # Simulated parsing of the file text content into structured context memory
             new_doc = {"Filename": uploaded_file.name, "Type": "Official Memorandum", "Extracted Needs": "Extracted requests targeting local road expansion and school infrastructure benchmarks."}
             st.session_state.uploaded_docs.append(new_doc)
             st.success(f"🤖 AI Document Parser scanned '{uploaded_file.name}' successfully and mapped requirements.")
@@ -111,7 +109,6 @@ with tab2:
     
     if st.button("🚀 Compile and Run AI Budget Allocation Engine"):
         with st.spinner("Analyzing regional monsoon rain parameters, cross-checking 2 Dhyanakarshan letters, and prioritizing high-density grievance sectors..."):
-            # Simulation of complex geographical and policy logic engine mapping out funds
             st.session_state.allocations = [
                 {"Project Name": "Ward 4 Agricultural Canal Concrete Repair", "Ward": "Ward 4", "Sector": "Irrigation", "Allocated Amount (NPR)": 18000000.0, "AI Logic Blueprint": "Prioritized due to High Rain/Monsoon threat data in Madhesh terrain + matches CMP-003 baseline grievance perfectly."},
                 {"Project Name": "Ward 1 Connecting Corridor Tarring and Drainage", "Ward": "Ward 1", "Sector": "Roads", "Allocated Amount (NPR)": 20000000.0, "AI Logic Blueprint": "Fulfills Inter-Party Dhyanakarshan request and solves high-density dusty environment logs listed in CMP-002."},
@@ -119,13 +116,9 @@ with tab2:
                 {"Project Name": "Emergency Disaster & Climate Relief Reserves", "Ward": "All", "Sector": "Contingency", "Allocated Amount (NPR)": 5000000.0, "AI Logic Blueprint": "Required contingency buffering mandated by Mayor's climate-focus directive input fields."}
             ]
             
-            # Map tracking loop back to complaints array
-            st.session_state.complaints[0]["Status"] = "SUCCESS (Budget Allocated)"
-            st.session_state.complaints[0]["Notification"] = "SMS Dispatched: Funded"
-            st.session_state.complaints[1]["Status"] = "SUCCESS (Budget Allocated)"
-            st.session_state.complaints[1]["Notification"] = "SMS Dispatched: Funded"
-            st.session_state.complaints[2]["Status"] = "SUCCESS (Budget Allocated)"
-            st.session_state.complaints[2]["Notification"] = "SMS Dispatched: Funded"
+            for c in st.session_state.complaints:
+                c["Status"] = "SUCCESS (Budget Allocated)"
+                c["Notification"] = "SMS Dispatched: Funded"
             
             st.success("✅ AI Draft Compiled! Review the structured breakdown below:")
             st.rerun()
@@ -134,7 +127,6 @@ with tab2:
         df_alloc = pd.DataFrame(st.session_state.allocations)
         st.dataframe(df_alloc, use_container_width=True)
         
-        # Safe CSV Download Engine (Zero openpyxl dependencies to stay crash-free)
         csv_data = df_alloc.to_csv(index=False).encode('utf-8')
         st.download_button(label="📥 Export AI Draft to Excel/CSV", data=csv_data, file_name="ai_bajet_sunuwai_draft.csv", mime="text/csv")
         
@@ -142,3 +134,15 @@ with tab2:
         st.subheader("🔧 Manual Planning Engineer Modification Layer")
         uploaded_csv = st.file_uploader("Upload Modified Spreadsheet to Override AI Draft (Human-in-the-Loop Safeguard)", type=["csv"])
         if uploaded_csv is not None:
+            try:
+                st.session_state.allocations = pd.read_csv(uploaded_csv).to_dict(orient="records")
+                st.success("System database overwritten with verified technical modifications successfully.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error parsing uploaded file: {e}")
+    else:
+        st.info("The AI budget sheet has not been compiled yet. Set your rules and click the engine trigger button above.")
+
+# TAB 3: ACCOUNTABILITY MATRIX & CENTRAL GOVERNMENT ESCALATION ROUTER
+with tab3:
+    st.header("📡 Closed-Loop Feedback Registry & Hello Sarkar Router")
