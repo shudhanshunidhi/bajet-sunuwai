@@ -57,7 +57,9 @@ with tab1:
         c_lang = st.selectbox("Language", ["Nepali", "Maithili", "Bhojpuri", "English"])
         c_text = st.text_area("Your Grievance (Natural Text Input)")
         
-        submitted = st.form_submit_with_button_input("Submit to Bajet Sunuwai System")
+        # --- FIXED FUNCTION CALL ---
+        submitted = st.form_submit_button("Submit to Bajet Sunuwai System")
+        
         if submitted and c_text:
             # Mock Agent Processing
             new_id = f"CMP-00{len(st.session_state.complaints) + 1}"
@@ -70,7 +72,7 @@ with tab1:
 # TAB 2: EXCEL INTERFACE LOOP
 with tab2:
     st.header("🏗️ Engineer Allocations & Bidirectional Excel Interface")
-    st.info("The Planning Engineer can inspect the AI-suggested budget, edit it manually via Microsoft Excel offline, and re-upload it.")
+    st.info("The Planning Engineer can inspect the AI-suggested budget, edit it manually via Microsoft Excel offline, and re-uploaded it.")
     
     df_alloc = pd.DataFrame(st.session_state.allocations)
     st.dataframe(df_alloc, use_container_width=True)
