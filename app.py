@@ -63,9 +63,9 @@ if 'allocations' not in st.session_state:
 if 'budget_published' not in st.session_state:
     st.session_state.budget_published = False
 
-# --- BRANDING LAYER ---
-st.markdown('<div class="main-title">🇳🇵 Bajet Sunuwai (बजेट सुनुवाई)</div>', unsafe_with_html=True)
-st.markdown('<div class="subtitle">An Agentic AI Civic Accountability Framework Connecting Local Public Feedback Closures directly to Municipal Capital Allocations.</div>', unsafe_with_html=True)
+# --- BRANDING LAYER (CORRECTED PARAMETER NAMES) ---
+st.markdown('<div class="main-title">🇳🇵 Bajet Sunuwai (बजेट सुनुवाई)</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">An Agentic AI Civic Accountability Framework Connecting Local Public Feedback Closures directly to Municipal Capital Allocations.</div>', unsafe_allow_html=True)
 
 # --- SYSTEM EXPERIENCE EXPERIENCE (Clean User Tabs) ---
 app_view = st.sidebar.radio("🌐 Select Portal View", ["👤 Public Citizen Portal", "🏢 Municipal Admin Operations Room"])
@@ -74,13 +74,13 @@ app_view = st.sidebar.radio("🌐 Select Portal View", ["👤 Public Citizen Por
 # 👤 USER VIEW 1: PUBLIC CITIZEN INTERFACE
 # ==========================================
 if app_view == "👤 Public Citizen Portal":
-    st.markdown('<div class="section-header">📥 Public Budget Feedback & Grievance Submission Box</div>', unsafe_with_html=True)
+    st.markdown('<div class="section-header">📥 Public Budget Feedback & Grievance Submission Box</div>', unsafe_allow_html=True)
     st.write("Wards and Municipal Offices are actively requesting policy inputs (*Bajet Niti Karyakram Sambandhi Sujhav Sankalan*). Submit your infrastructure problems or policy recommendations in natural text below.")
     
     col_entry, col_status = st.columns([1, 1.2])
     
     with col_entry:
-        st.markdown('<div class="card">', unsafe_with_html=True)
+        st.markdown('<div class="card">', unsafe_with_html=True) if "unsafe_with_html" in dir(st) else st.markdown('<div class="card">', unsafe_allow_html=True)
         st.subheader("Submit Request / Sujhav")
         with st.form("citizen_input_form", clear_on_submit=True):
             citizen_ward = st.selectbox("Your Target Ward Location", ["Ward 1", "Ward 2", "Ward 3", "Ward 4", "Ward 5"])
@@ -95,7 +95,7 @@ if app_view == "👤 Public Citizen Portal":
                     "ID": new_id, "Ward": citizen_ward, "Sector": citizen_sector, "Language": citizen_lang, "Text": citizen_text, "Priority": "🔴 High Priority", "Status": "Pending Review", "Official Response": "", "Budget Linked": "No", "Days Unresolved": 0
                 })
                 st.success(f"🤖 AI Ingestion Agent parsed and synchronized your submission successfully. Track ID: **{new_id}**")
-        st.markdown('</div>', unsafe_with_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
     with col_status:
         st.subheader("📡 Live Transparency & Tracking Matrix")
@@ -124,7 +124,7 @@ if app_view == "👤 Public Citizen Portal":
 # 🏢 USER VIEW 2: MUNICIPAL OPERATIONS ROOM
 # ==========================================
 else:
-    st.markdown('<div class="section-header">🏢 Municipal Planning Control Center</div>', unsafe_with_html=True)
+    st.markdown('<div class="section-header">🏢 Municipal Planning Control Center</div>', unsafe_allow_html=True)
     st.write("Secure internal console for the Mayor, Ward Chairs, and Technical Municipal Engineers to process funding ceilings and generate layouts.")
     
     # DYNAMIC FISCAL STATS CARD
@@ -141,4 +141,3 @@ else:
     with st.expander("⚙️ Step 1: Manage Financial Revenues & Policy Prompts", expanded=False):
         f_col1, f_col2, f_col3 = st.columns(3)
         st.session_state.central_grant = f_col1.number_input("Federal Equalization & Conditional Grants (NPR)", value=st.session_state.central_grant, step=100000.0)
-        st.session_state.provincial_grant = f_col2.number_input("Provincial Grants (NPR)", value=st.session_state.provincial_grant, step=100000.0)
