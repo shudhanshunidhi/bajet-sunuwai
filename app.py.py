@@ -1,8 +1,9 @@
 import streamlit as st
 import pandas as pd
 import io
-import openpyxl  # <--- FORCES STREAMLIT CORE TO REGULATE THE MODULE INITIALIZATION
-from openpyxl import Workbook  # <--- ACCELERATES ENGINE DISCOVERY FOR PANDAS
+import openpyxl  # Forces engine detection on cloud servers
+from openpyxl import Workbook
+
 # --- PAGE CONFIGURATION & THEME ---
 st.set_page_config(page_title="Bajet Sunuwai AI Portal", layout="wide", page_icon="🇳🇵")
 
@@ -58,7 +59,6 @@ with tab1:
         c_lang = st.selectbox("Language", ["Nepali", "Maithili", "Bhojpuri", "English"])
         c_text = st.text_area("Your Grievance (Natural Text Input)")
         
-        # --- FIXED FUNCTION CALL ---
         submitted = st.form_submit_button("Submit to Bajet Sunuwai System")
         
         if submitted and c_text:
@@ -73,12 +73,12 @@ with tab1:
 # TAB 2: EXCEL INTERFACE LOOP
 with tab2:
     st.header("🏗️ Engineer Allocations & Bidirectional Excel Interface")
-    st.info("The Planning Engineer can inspect the AI-suggested budget, edit it manually via Microsoft Excel offline, and re-uploaded it.")
+    st.info("The Planning Engineer can inspect the AI-suggested budget, edit it manually via Microsoft Excel offline, and re-upload it.")
     
     df_alloc = pd.DataFrame(st.session_state.allocations)
     st.dataframe(df_alloc, use_container_width=True)
     
-    # Export to Excel Action
+    # Export to Excel Action using safe context execution
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         df_alloc.to_excel(writer, index=False, sheet_name="AI_Budget_Allocation_Draft")
@@ -96,7 +96,7 @@ with tab2:
     uploaded_file = st.file_uploader("Choose the modified Excel file to instantly recalculate citizen notification matrices:", type=["xlsx"])
     if uploaded_file is not None:
         try:
-            uploaded_df = pd.read_excel(uploaded_file)
+            uploaded_df = pd.read_excel(uploaded_file, engine='openpyxl')
             st.session_state.allocations = uploaded_df.to_dict(orient="records")
             st.success("✅ Financial allocations synchronized with Engineer's adjustments! Citizen SMS pipelines triggered.")
             st.rerun()
