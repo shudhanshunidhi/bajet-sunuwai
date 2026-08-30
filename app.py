@@ -33,7 +33,7 @@ st.markdown("""
     .badge-high { background-color: #FEE2E2; color: #991B1B; padding: 4px 8px; border-radius: 5px; font-weight: bold; font-size: 0.8rem; }
     .badge-status { background-color: #DBEAFE; color: #1E40AF; padding: 4px 8px; border-radius: 5px; font-weight: bold; font-size: 0.8rem; }
     </style>
-""", unsafe_with_html=True)
+""", unsafe_allow_html=True)
 
 # --- INITIALIZE SECURE STATE DATABASE ---
 if 'central_grant' not in st.session_state:
@@ -67,7 +67,7 @@ if 'budget_published' not in st.session_state:
 st.markdown('<div class="main-title">🇳🇵 Bajet Sunuwai (बजेट सुनुवाई)</div>', unsafe_with_html=True)
 st.markdown('<div class="subtitle">An Agentic AI Civic Accountability Framework Connecting Local Public Feedback Closures directly to Municipal Capital Allocations.</div>', unsafe_with_html=True)
 
-# --- SYSTEM EXPERIENCE SEGREGATION (Clean User Tabs) ---
+# --- SYSTEM EXPERIENCE EXPERIENCE (Clean User Tabs) ---
 app_view = st.sidebar.radio("🌐 Select Portal View", ["👤 Public Citizen Portal", "🏢 Municipal Admin Operations Room"])
 
 # ==========================================
