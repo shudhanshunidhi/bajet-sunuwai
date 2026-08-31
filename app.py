@@ -89,6 +89,99 @@ CLIMATE_JUSTIFICATIONS = [
     "Supports irrigation resilience against erratic Madhesh rainfall distribution",
 ]
 
+# --------------------------------------------------------------------------
+# WARD GEOGRAPHIC / RISK PROFILES
+# --------------------------------------------------------------------------
+# NOTE FOR THE TEAM: these figures are illustrative placeholders written for
+# the hackathon demo, NOT sourced from Nagarain Municipality's actual GIS,
+# census, or Disaster Risk Reduction records. Before any real deployment,
+# replace this dict with verified ward-level data from the municipality's
+# profile report / DRR office / CBS census so the agent's geographic
+# reasoning is grounded in fact rather than a plausible placeholder.
+WARD_PROFILES = {
+    "Ward 1": {
+        "terrain": "Riverside lowland, adjacent to the main seasonal river channel",
+        "flood_risk": "High",
+        "population_estimate": 6200,
+        "existing_infra_notes": "Weak embankment, aging drainage culverts",
+    },
+    "Ward 2": {
+        "terrain": "Market/bazaar corridor, moderately dense settlement",
+        "flood_risk": "Medium",
+        "population_estimate": 7100,
+        "existing_infra_notes": "Highest commercial footfall; streetlight and drainage gaps",
+    },
+    "Ward 3": {
+        "terrain": "Low-lying agricultural belt with shallow groundwater table",
+        "flood_risk": "High",
+        "population_estimate": 5400,
+        "existing_infra_notes": "Water supply pipeline network is over 15 years old",
+    },
+    "Ward 4": {
+        "terrain": "Mixed farmland and residential, gently sloped",
+        "flood_risk": "Medium",
+        "population_estimate": 4900,
+        "existing_infra_notes": "Canal network serves most farms but silts up yearly",
+    },
+    "Ward 5": {
+        "terrain": "Southern agricultural plain, closest to the Nepal-India border belt",
+        "flood_risk": "High",
+        "population_estimate": 5800,
+        "existing_infra_notes": "Irrigation canals undersized for peak monsoon flow",
+    },
+}
+
+
+def ward_profile_summary():
+    lines = []
+    for ward, p in WARD_PROFILES.items():
+        lines.append(
+            f"- {ward}: {p['terrain']}. Flood risk: {p['flood_risk']}. "
+            f"Est. population: {p['population_estimate']:,}. "
+            f"Infrastructure notes: {p['existing_infra_notes']}."
+        )
+    return "\n".join(lines)
+
+
+def citizen_demand_summary():
+    """
+    Aggregate the current complaint set into a structured 'what citizens
+    actually want this cycle' briefing — by ward and by sector, weighted
+    by priority. This is what a new, first-time mayor would otherwise have
+    no easy way to see across scattered paper complaints.
+    """
+    complaints = st.session_state.get("complaints", [])
+    if not complaints:
+        return "No citizen suggestions submitted yet this cycle.", {}
+
+    by_sector = {}
+    by_ward = {}
+    for c in complaints:
+        sector = c["sector"]
+        ward = c["ward"]
+        weight = 2 if c["priority"] == "High Priority" else 1
+        by_sector[sector] = by_sector.get(sector, 0) + weight
+        by_ward[ward] = by_ward.get(ward, 0) + weight
+
+    total = sum(by_sector.values()) or 1
+    sector_lines = [
+        f"- {sector}: {count} weighted signal(s) — "
+        f"{round(100 * count / total)}% of citizen demand this cycle"
+        for sector, count in sorted(by_sector.items(), key=lambda x: -x[1])
+    ]
+    ward_lines = [
+        f"- {ward}: {count} weighted signal(s)"
+        for ward, count in sorted(by_ward.items(), key=lambda x: -x[1])
+    ]
+    summary_text = (
+        "Citizen demand by sector (High Priority counts double):\n"
+        + "\n".join(sector_lines)
+        + "\n\nCitizen demand by ward:\n"
+        + "\n".join(ward_lines)
+    )
+    return summary_text, {"by_sector": by_sector, "by_ward": by_ward}
+
+
 SYNTHETIC_TEMPLATES = [
     ("Roads", "Nepali", "Yo bato dherai barsha dekhi bigreko cha, gaadi chalauna gaahro bha cha."),
     ("Water", "Maithili", "Hamar gaaon me paani ke supply bahut din se band ba, jaldi sudhaar chahi."),
@@ -597,21 +690,41 @@ def run_ai_allocation_engine():
         f"- {m['source']} ({m['doc_type']}): {m['demand']}" for m in st.session_state.memos
     ) or "(no memos ingested)"
 
+    demand_summary_text, _ = citizen_demand_summary()
+    geo_summary_text = ward_profile_summary()
+
     system_prompt = (
         "You are the capital budget allocation agent for Nagarain Municipality, "
-        "Dhanusa, Madhesh Province, Nepal. You must decide how to allocate the "
-        "available capital budget across open citizen complaints. Use the tools "
-        "provided: check get_remaining_budget before large decisions, call "
+        "Dhanusa, Madhesh Province, Nepal. Many mayors in Nepal serve only one "
+        "5-year term and have no prior experience building a municipal capital "
+        "budget — you exist to give them a defensible, ward-aware, evidence-based "
+        "starting allocation, not a generic one. You must decide how to allocate "
+        "the available capital budget across open citizen complaints. Use the "
+        "tools provided: check get_remaining_budget before large decisions, call "
         "fund_project or defer_complaint for EVERY open complaint exactly once, "
         "and call finish_allocation when done. Never propose an amount larger "
-        "than the remaining budget. Ground every justification in the Mayor's "
-        "policy directive, Madhesh's monsoon/flood climate context, and the "
-        "specific complaint content — do not use generic boilerplate."
+        "than the remaining budget.\n\n"
+        "Ground every funding decision in THREE things, and name which ones "
+        "applied in the justification field:\n"
+        "1. The specific ward's geographic/flood-risk profile below — a "
+        "complaint from a High flood-risk ward with weak existing "
+        "infrastructure should generally outrank an equivalent complaint from "
+        "a lower-risk ward, all else equal.\n"
+        "2. The aggregate citizen demand signal below — sectors and wards "
+        "where citizens are collectively asking loudest (more submissions, "
+        "more High Priority flags) should be weighted higher, not just the "
+        "individual complaint in isolation.\n"
+        "3. The Mayor's policy directive and any ingested memos.\n"
+        "Do not use generic boilerplate language — reference the actual ward "
+        "profile facts and demand numbers given to you."
     )
 
     user_prompt = (
         f"Total Revenue Ceiling: {fmt_npr(total_revenue_ceiling())}\n\n"
         f"Mayor's Policy Directive:\n{st.session_state.policy_directive}\n\n"
+        f"Ward Geographic / Flood-Risk Profiles:\n{geo_summary_text}\n\n"
+        f"Aggregate Citizen Demand This Cycle (from Bajet Niti Karyakram "
+        f"Sambandhi Sujhav Sankalan submissions):\n{demand_summary_text}\n\n"
         f"Ingested Memos:\n{memo_summaries}\n\n"
         f"Open Complaints (each must be funded or deferred):\n{complaint_summaries}\n\n"
         f"Begin the allocation process now."
@@ -1164,6 +1277,59 @@ def render_admin_portal():
             save_state()
             st.success("Saved.")
 
+    # --- MAYOR'S BUDGET BRIEFING (for first-time / new mayors) ---
+    with st.expander("🧭 Mayor's Budget Briefing — Read This If You're New", expanded=False):
+        st.caption(
+            "Every 5 years a new mayor takes office with no prior experience "
+            "building a municipal capital budget. This briefing summarizes, in "
+            "plain language, the two things that should drive allocation "
+            "decisions this cycle — where the geographic risk sits, and what "
+            "citizens are actually asking for — before you touch a single number."
+        )
+
+        st.markdown("##### 🗺️ Ward Geographic & Flood-Risk Profile")
+        st.caption(
+            "Illustrative demo data — a real deployment would pull this from "
+            "the municipality's verified GIS / DRR / census records."
+        )
+        ward_rows = [
+            {
+                "Ward": ward,
+                "Terrain": p["terrain"],
+                "Flood Risk": p["flood_risk"],
+                "Est. Population": p["population_estimate"],
+                "Infrastructure Notes": p["existing_infra_notes"],
+            }
+            for ward, p in WARD_PROFILES.items()
+        ]
+        st.dataframe(pd.DataFrame(ward_rows), use_container_width=True, hide_index=True)
+
+        st.markdown("##### 📣 What Citizens Are Asking For This Cycle")
+        demand_text, demand_data = citizen_demand_summary()
+        if demand_data:
+            dcol1, dcol2 = st.columns(2)
+            with dcol1:
+                st.markdown("**By Sector**")
+                sector_df = pd.DataFrame(
+                    [{"Sector": k, "Weighted Signal": v} for k, v in
+                     sorted(demand_data["by_sector"].items(), key=lambda x: -x[1])]
+                )
+                st.dataframe(sector_df, use_container_width=True, hide_index=True)
+            with dcol2:
+                st.markdown("**By Ward**")
+                ward_demand_df = pd.DataFrame(
+                    [{"Ward": k, "Weighted Signal": v} for k, v in
+                     sorted(demand_data["by_ward"].items(), key=lambda x: -x[1])]
+                )
+                st.dataframe(ward_demand_df, use_container_width=True, hide_index=True)
+            st.caption(
+                "\"Weighted signal\" counts each High Priority complaint twice — "
+                "this is exactly what the AI Allocation Agent in Step 4 sees "
+                "and reasons over alongside the ward risk table above."
+            )
+        else:
+            st.caption("No citizen suggestions submitted yet this cycle.")
+
     # --- STEP 2 ---
     with st.expander("📄 Step 2: Ingest Memos & Dhyanakarshan Letters", expanded=False):
         uploaded_memo = st.file_uploader(
@@ -1277,9 +1443,11 @@ def render_admin_portal():
         st.write("")
         st.write(
             "This agent is given the revenue ceiling, the Mayor's policy directive, "
-            "every ingested memo, and every open complaint. It then decides — turn by "
-            "turn, via tool calls — what to fund, defer, or reject, and why. The app "
-            "enforces the hard budget ceiling; the agent decides everything within it."
+            "every ward's geographic/flood-risk profile, the aggregate citizen demand "
+            "signal from this cycle's submissions, every ingested memo, and every open "
+            "complaint. It then decides — turn by turn, via tool calls — what to fund, "
+            "defer, or reject, and why. The app enforces the hard budget ceiling; the "
+            "agent decides everything within it."
         )
 
         if st.button("🚀 Compile and Run AI Budget Allocation Engine", type="primary"):
