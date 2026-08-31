@@ -1,0 +1,16 @@
+# --- Secrets: NEVER commit these ---
+.streamlit/secrets.toml
+
+# --- Local database (created automatically when the app runs) ---
+bajet_sunuwai.db
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
