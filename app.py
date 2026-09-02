@@ -1,2079 +1,910 @@
 """
-Bajet Sunuwai (बजेट सुनुवाई)
-================================
-A multi-agent, agentic AI civic-budget platform for Nagarain Municipality,
-Dhanusa, Madhesh Province, Nepal. Built for the Yantra Business Cup
-SOFTBOTS AI Hackathon.
+Bajet Sunuwai (बजेट सुनुवाई) — Agentic Civic Budget Formulation Prototype
+=========================================================================
 
-FOUR-AGENT ARCHITECTURE
-  1. Ingestion & NLP Agent — reads a raw citizen complaint (text, or a
-     photographed memo/petition) and returns a structured classification:
-     detected language, sector, an objective Severity Score, and reasoning.
-  2. Context-Aware Allocation Agent — a multi-step tool-use LOOP. Given the
-     budget ceiling, the Mayor's policy directive, LIVE hazard data pulled
-     from the Open-Meteo API for each ward, and the aggregate citizen
-     demand signal, it decides — turn by turn — what to fund or defer, and
-     why. The app enforces the hard budget ceiling; the agent decides
-     everything within it.
-  3. Independent Auditor & Fairness Agent — runs AFTER allocation. It
-     compares the final decisions (including any manual official
-     overrides) against the objective citizen demand data and raises
-     Conflict Flags where a high-severity ward/sector was starved in favor
-     of a lower-priority one.
-  4. Output, Export & Notification Agent — converts the approved budget
-     into a downloadable .xlsx/.csv, and drives citizen notifications
-     (WhatsApp + the Live Transparency Matrix), logging a full lifecycle
-     from complaint ID to allocated Project ID to notification sent.
+A single-file Streamlit prototype demonstrating a "Twin-Engine" agentic
+architecture for Nepali local government budget formulation, bridging the
+gap between Step 3 (Tole/Settlement selection) and Step 5 (Integrated
+Program & Policy formulation) of the 7-step planning process mandated
+under the Local Government Operation Act, 2074.
 
-All three AI agents gracefully fall back to deterministic simulation logic
-if no ANTHROPIC_API_KEY is configured, or if a live call fails — so the
-demo never crashes, but the UI is always explicit about which mode is
-actually running (🟢 Live AI vs 🟠 Fallback Simulation).
+Engine A (Bottom-Up):  Ingests, translates and clusters unstructured,
+                        multi-dialect citizen complaints into the 5
+                        statutory thematic sectors.
+Engine B (Top-Down):    "Thatha" data verification — cross-references
+                        demographic matrices against Strategic Master
+                        Plan Mandates and ring-fences baseline capital
+                        works BEFORE citizen complaints are parsed.
 
-COST NOTE: GitHub, Streamlit Community Cloud hosting, and the Open-Meteo
-hazard API used here are all free / keyless. The Anthropic API calls that
-power the three agents are NOT free — budget some API credit before a
-live demo.
-
-Run with:  streamlit run bajet_sunuwai_app.py
-Requires:  ANTHROPIC_API_KEY set as an environment variable or in
-           .streamlit/secrets.toml as ANTHROPIC_API_KEY = "sk-ant-..."
-Optional:  ADMIN_PASSWORD in the same places (defaults to
-           "hellosarkar2026" if not set).
+Run with:  streamlit run app.py
 """
 
-import base64
 import io
-import json
-import os
-import random
-import sqlite3
-from datetime import datetime, timedelta
-from urllib.parse import quote
+from datetime import datetime
 
+import numpy as np
 import pandas as pd
 import streamlit as st
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
-try:
-    import anthropic
-    ANTHROPIC_SDK_AVAILABLE = True
-except ImportError:
-    ANTHROPIC_SDK_AVAILABLE = False
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-try:
-    import requests
-    REQUESTS_AVAILABLE = True
-except ImportError:
-    REQUESTS_AVAILABLE = False
-
-# --------------------------------------------------------------------------
-# PAGE CONFIG
-# --------------------------------------------------------------------------
-st.set_page_config(
-    page_title="Bajet Sunuwai | बजेट सुनुवाई",
-    page_icon="🏛️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# --------------------------------------------------------------------------
-# CONSTANTS
-# --------------------------------------------------------------------------
-WARDS = ["Ward 1", "Ward 2", "Ward 3", "Ward 4", "Ward 5"]
-
-# The five mandatory thematic municipal sectors under Nepal's local-level
-# participatory planning process.
 SECTORS = [
     "Infrastructure",
-    "Social Development",
-    "Economic Development",
-    "Agriculture & Environment",
+    "Social",
+    "Economic",
+    "Environment/Agriculture",
     "Governance",
 ]
 
-LANGUAGES = ["Nepali", "Maithili", "Bhojpuri"]
+NAVY = "1B365D"
+LIGHT_GREY = "F2F2F2"
+ACCENT_GOLD = "C99A2E"
 
-MODEL_NAME = "claude-sonnet-5"
-
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bajet_sunuwai.db")
-
-HELLO_SARKAR_PORTAL_URL = "https://gunaso.opmcm.gov.np/home"
-HELLO_SARKAR_WHATSAPP_NUMBER = "9779851145045"  # +977 985-1145045
-
-URGENCY_KEYWORDS = [
-    "bhayavaha", "samasya", "khatara", "flood", "baadhi", "toot", "bigreko",
-    "nasta", "urgent", "aapatkalin", "kharab", "risk", "danger", "collapsed",
-    "dukh", "kasht", "problem", "damage",
-]
-
-CLIMATE_JUSTIFICATIONS = [
-    "Prioritized due to high rainfall risk indices typical of Madhesh terrain",
-    "Flagged under monsoon-flooding vulnerability mapping for the Tarai belt",
-    "Aligned with river-embankment erosion risk common to Dhanusa wards",
-    "Matches seasonal waterlogging patterns recorded in prior monsoon cycles",
-    "Supports irrigation resilience against erratic Madhesh rainfall distribution",
-]
-
-# --------------------------------------------------------------------------
-# WARD GEOGRAPHIC / HAZARD PROFILES
-# --------------------------------------------------------------------------
-# NOTE FOR THE TEAM: the lat/lon values are small offsets around Nagarain
-# Municipality's real center point (26.63889°N, 85.91611°E, per public
-# records) approximating each ward's rough position — NOT surveyed ward
-# boundary centroids. The terrain/infrastructure text is illustrative for
-# the demo. Before real deployment, replace both with verified data from
-# the municipality's GIS office / ward profile reports / CBS census.
-# The flood-risk NUMBERS, however, are fetched live from Open-Meteo
-# (api.open-meteo.com) — a free, keyless weather API — so that part of the
-# "connects to external environmental/hazard APIs" claim is genuinely real.
-WARD_PROFILES = {
-    "Ward 1": {
-        "lat": 26.6420, "lon": 85.9050,
-        "terrain": "Riverside lowland, adjacent to the main seasonal river channel",
-        "flood_risk": "High",
-        "population_estimate": 6200,
-        "existing_infra_notes": "Weak embankment, aging drainage culverts",
-    },
-    "Ward 2": {
-        "lat": 26.6389, "lon": 85.9161,
-        "terrain": "Market/bazaar corridor, moderately dense settlement",
-        "flood_risk": "Medium",
-        "population_estimate": 7100,
-        "existing_infra_notes": "Highest commercial footfall; streetlight and drainage gaps",
-    },
-    "Ward 3": {
-        "lat": 26.6300, "lon": 85.9200,
-        "terrain": "Low-lying agricultural belt with shallow groundwater table",
-        "flood_risk": "High",
-        "population_estimate": 5400,
-        "existing_infra_notes": "Water supply pipeline network is over 15 years old",
-    },
-    "Ward 4": {
-        "lat": 26.6470, "lon": 85.9250,
-        "terrain": "Mixed farmland and residential, gently sloped",
-        "flood_risk": "Medium",
-        "population_estimate": 4900,
-        "existing_infra_notes": "Canal network serves most farms but silts up yearly",
-    },
-    "Ward 5": {
-        "lat": 26.6250, "lon": 85.9100,
-        "terrain": "Southern agricultural plain, closest to the Nepal-India border belt",
-        "flood_risk": "High",
-        "population_estimate": 5800,
-        "existing_infra_notes": "Irrigation canals undersized for peak monsoon flow",
-    },
+URGENCY_KEYWORDS = {
+    5: ["आपतकालीन", "emergency", "urgent", "जोखिम", "collapse", "ढल्न", "danger"],
+    4: ["तत्काल", "immediately", "बाढी", "flood", "epidemic", "महामारी"],
 }
 
+FISCAL_YEARS = ["2082/83", "2083/84", "2084/85"]
 
-def fetch_ward_hazard(ward):
+DEMO_COMPLAINTS = [
+    {
+        "Ward": 1,
+        "Sector": "Infrastructure",
+        "Complaint (raw, multi-dialect)": "गाउँको मुख्य सडक वर्षामा पूरै डुब्छ, तत्काल कल्भर्ट चाहियो।",
+        "Urgency (1-5)": 4,
+    },
+    {
+        "Ward": 2,
+        "Sector": "Social",
+        "Complaint (raw, multi-dialect)": "स्कुलमे शौचालय नहिये, बेटी सभ के बहुत दिक्कत होई छै।",
+        "Urgency (1-5)": 3,
+    },
+    {
+        "Ward": 3,
+        "Sector": "Economic",
+        "Complaint (raw, multi-dialect)": "हाट बजार क्षेत्रमा विद्युतीय पोल र प्रकाश व्यवस्था छैन।",
+        "Urgency (1-5)": 2,
+    },
+    {
+        "Ward": 4,
+        "Sector": "Environment/Agriculture",
+        "Complaint (raw, multi-dialect)": "सिंचाई नहर टुटल बा, धान के खेत सुखा रहल बा, आपतकालीन मर्मत चाही।",
+        "Urgency (1-5)": 5,
+    },
+    {
+        "Ward": 5,
+        "Sector": "Governance",
+        "Complaint (raw, multi-dialect)": "वडा कार्यालयमा नागरिकता सिफारिस पाउन एक हप्ता कुर्नुपर्छ, डिजिटलाइजेसन चाहियो।",
+        "Urgency (1-5)": 2,
+    },
+    {
+        "Ward": 6,
+        "Sector": "Infrastructure",
+        "Complaint (raw, multi-dialect)": "पुल भत्किसकेको छ, यात्रुहरु जोखिममा छन्, collapse हुने अवस्थामा छ।",
+        "Urgency (1-5)": 5,
+    },
+]
+
+# ---------------------------------------------------------------------------
+# Agent System Prompts
+# ---------------------------------------------------------------------------
+# These are the exact system prompts that would be handed to an LLM
+# orchestrator (e.g. LangGraph nodes) in production. In this offline
+# prototype, ``simulate_ingestion_agent`` etc. approximate the same
+# behaviour deterministically so the app runs without API keys.
+
+INGESTION_TRANSLATION_AGENT_PROMPT = """
+You are the INGESTION & TRANSLATION AGENT for Bajet Sunuwai, a civic budget
+intelligence platform serving Nepali local governments.
+
+INPUT: Raw, unstructured citizen grievances collected at Tole Bhela
+(settlement-level ward assemblies). These inputs may be written in Nepali,
+Maithili, Bhojpuri, Tharu, or code-mixed combinations of these, and are
+frequently ungrammatical, abbreviated, or transliterated.
+
+YOUR TASKS, IN ORDER:
+1. NORMALIZE: Translate/transliterate the raw complaint into a clean,
+   administrative-register English log entry suitable for a government
+   file, while preserving all place names, infrastructure references and
+   quantities exactly.
+2. SECTOR TAG: Classify the complaint into exactly ONE of the five
+   statutory thematic sectors mandated under the Local Government
+   Operation Act, 2074:
+      - Infrastructure
+      - Social
+      - Economic
+      - Environment/Agriculture
+      - Governance
+3. URGENCY SCORE: Assign an urgency score from 1 (routine / long-term) to
+   5 (life-safety / emergency), based on:
+      - explicit danger/collapse/flood/epidemic language,
+      - vulnerability of the affected population (children, elderly,
+        disabled, pregnant women),
+      - recurrence (has this been raised before without resolution?).
+4. DEDUPLICATE: Flag near-duplicate entries from the same ward/sector so
+   the Contextual Allocator Agent does not double-count urgency.
+5. OUTPUT FORMAT: Return a structured JSON object per complaint:
+   { "ward": int, "sector": str, "clean_text": str, "urgency": int,
+     "duplicate_of": Optional[int], "language_detected": str }
+
+CONSTRAINTS:
+- Never invent facts not present in the raw complaint.
+- Never resolve ambiguity by guessing a ward or sector — if truly
+  ambiguous, tag sector as "Governance" (catch-all for administrative
+  processing) and flag "needs_human_review": true.
+- Preserve any Nepali fiscal-year or NPR figures verbatim.
+"""
+
+CONTEXTUAL_ALLOCATOR_AGENT_PROMPT = """
+You are the CONTEXTUAL ALLOCATOR AGENT for Bajet Sunuwai. You receive:
+  (a) the structured, sector-tagged citizen complaint log from the
+      Ingestion & Translation Agent (Engine A — Bottom-Up), and
+  (b) the municipality's demographic matrix and Strategic Master Plan
+      Mandates (Engine B — Top-Down "Thatha" verification).
+
+YOUR ALLOCATION ALGORITHM IS STRICTLY SEQUENTIAL — DO NOT REORDER:
+
+STEP 1 — MANDATORY RING-FENCING (Top-Down, runs FIRST, before any
+complaint is read):
+  Cross-reference the demographic matrix against statutory service-level
+  benchmarks. If a structural gap is detected (e.g. population exceeds
+  40,000 within a health-service radius with zero secondary hospitals,
+  or population exceeds the statutory threshold for a secondary/high
+  school with no facility present), you MUST inject a baseline capital
+  project for that gap and ring-fence its estimated cost from the Total
+  Budget Ceiling BEFORE any citizen-driven allocation occurs. This
+  guarantees that essential long-horizon infrastructure is never skipped
+  merely because no individual citizen happened to file a complaint
+  about it.
+
+STEP 2 — REMAINING BUDGET CALCULATION:
+  Remaining Budget = Total Budget Ceiling − Sum(Ring-Fenced Projects).
+  If ring-fenced mandates exceed the ceiling, flag a CRITICAL fiscal
+  infeasibility warning and cap ring-fencing at 60% of the ceiling.
+
+STEP 3 — SECTOR-WEIGHTED DISTRIBUTION (Bottom-Up):
+  Compute each sector's aggregate urgency weight = sum of urgency scores
+  of all (deduplicated) complaints in that sector. Distribute the
+  Remaining Budget across the 5 sectors proportionally to these weights.
+  A sector with zero complaints still receives a statutory floor of 3% of
+  the Remaining Budget to prevent total neglect.
+
+STEP 4 — WITHIN-SECTOR PROJECT ALLOCATION:
+  Within each sector's allotment, distribute funds across individual
+  complaints proportionally to their urgency score, converting each
+  complaint into a named line-item project with a ward reference.
+
+OUTPUT: A single itemized project list with columns: Project Name,
+Sector, Ward, Origin (Ring-Fenced Mandate | Citizen-Driven), Urgency,
+Allocated Amount (NPR).
+"""
+
+INDEPENDENT_AUDITOR_AGENT_PROMPT = """
+You are the INDEPENDENT AUDITOR AGENT for Bajet Sunuwai. You run AFTER the
+Contextual Allocator Agent and BEFORE the budget is exported for tabling.
+You have no authority to change allocations — only to flag them.
+
+CHECK 1 — POLITICAL / WARD BIAS:
+  Flag any single ward receiving more than 30% of the Total Budget
+  Ceiling, unless fully explained by a ring-fenced Strategic Master Plan
+  Mandate located in that ward.
+
+CHECK 2 — SECTORAL STARVATION:
+  Flag any statutory sector receiving less than its 3% statutory floor,
+  or receiving 0 NPR despite unresolved high-urgency (4-5) complaints.
+
+CHECK 3 — FUNDING MISMATCH:
+  Flag any ring-fenced mandate whose injected cost exceeds 50% of the
+  Total Budget Ceiling (fiscal infeasibility risk), and any citizen
+  project whose allocated amount is disproportionate to its urgency
+  score relative to peer projects in the same sector (>2x the sector's
+  per-urgency-point average).
+
+CHECK 4 — MANDATE INTEGRITY:
+  Confirm every demographic trigger that fired in Engine B has a
+  corresponding ring-fenced line item in the final export. A trigger
+  that fired but produced no line item is a CRITICAL integrity failure.
+
+OUTPUT: A verification log — one line per check, PASS or FLAGGED with a
+plain-language reason — appended to the budget document as an audit
+trail, never silently altered.
+"""
+
+# ---------------------------------------------------------------------------
+# Engine A — Ingestion & Translation (simulated)
+# ---------------------------------------------------------------------------
+
+
+def simulate_ingestion_agent(df: pd.DataFrame) -> pd.DataFrame:
+    """Approximates INGESTION_TRANSLATION_AGENT_PROMPT deterministically.
+
+    Boosts the user-supplied urgency slider when emergency-signal
+    keywords are present in the raw complaint text, flags likely
+    duplicates within the same (ward, sector) pair, and produces a
+    normalized administrative log line.
     """
-    Fetch a LIVE 7-day precipitation outlook for a ward's approximate
-    coordinates from the free, keyless Open-Meteo forecast API. Cached in
-    session_state so we don't refetch on every Streamlit rerun. Falls back
-    to the static baseline flood_risk rating if `requests` isn't available
-    or the call fails — this is the real "external environmental/hazard
-    API" connection called for in the architecture doc.
-    """
-    cache = st.session_state.setdefault("hazard_cache", {})
-    if ward in cache:
-        return cache[ward]
+    out = df.copy()
+    out["Detected Urgency Boost"] = 0
+    out["Needs Human Review"] = False
+    out["Normalized Log Entry"] = ""
 
-    profile = WARD_PROFILES[ward]
-    result = {
-        "source": "fallback",
-        "precip_7day_mm": None,
-        "max_precip_probability": None,
-    }
+    seen_pairs = {}
+    dup_flags = []
 
-    if REQUESTS_AVAILABLE:
-        try:
-            resp = requests.get(
-                "https://api.open-meteo.com/v1/forecast",
-                params={
-                    "latitude": profile["lat"],
-                    "longitude": profile["lon"],
-                    "daily": "precipitation_sum,precipitation_probability_max",
-                    "forecast_days": 7,
-                    "timezone": "Asia/Kathmandu",
-                },
-                timeout=6,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                daily = data.get("daily", {})
-                precip_values = daily.get("precipitation_sum") or []
-                prob_values = daily.get("precipitation_probability_max") or []
-                result = {
-                    "source": "live",
-                    "precip_7day_mm": round(sum(precip_values), 1) if precip_values else 0.0,
-                    "max_precip_probability": max(prob_values) if prob_values else 0,
-                }
-        except Exception:
-            pass
+    for idx, row in out.iterrows():
+        text = str(row.get("Complaint (raw, multi-dialect)", ""))
+        base_urgency = int(row.get("Urgency (1-5)", 1))
+        boost = 0
+        for score, keywords in URGENCY_KEYWORDS.items():
+            if any(k.lower() in text.lower() for k in keywords):
+                boost = max(boost, score - base_urgency)
+        out.at[idx, "Detected Urgency Boost"] = max(boost, 0)
 
-    cache[ward] = result
-    return result
+        sector = row.get("Sector", "Governance")
+        if sector not in SECTORS:
+            out.at[idx, "Needs Human Review"] = True
+            sector = "Governance"
 
+        ward = row.get("Ward", 0)
+        pair_key = (ward, sector)
+        is_dup = pair_key in seen_pairs
+        dup_flags.append(seen_pairs.get(pair_key, np.nan))
+        seen_pairs[pair_key] = idx
 
-def ward_profile_summary():
-    """Returns (summary_text, any_live_bool) combining static ward
-    context with live-or-fallback hazard data for every ward."""
-    lines = []
-    any_live = False
-    for ward, p in WARD_PROFILES.items():
-        hz = fetch_ward_hazard(ward)
-        if hz["source"] == "live":
-            any_live = True
-            hazard_text = (
-                f"LIVE 7-day forecast: {hz['precip_7day_mm']} mm total precipitation, "
-                f"{hz['max_precip_probability']}% peak daily rain probability (Open-Meteo)"
-            )
-        else:
-            hazard_text = f"Baseline flood-risk rating: {p['flood_risk']} (live forecast unavailable)"
-        lines.append(
-            f"- {ward}: {p['terrain']}. {hazard_text}. "
-            f"Est. population: {p['population_estimate']:,}. "
-            f"Infrastructure notes: {p['existing_infra_notes']}."
+        out.at[idx, "Normalized Log Entry"] = (
+            f"[Ward {ward} | {sector}] {text.strip()} "
+            f"(admin-log, urgency={min(base_urgency + boost, 5)})"
         )
-    return "\n".join(lines), any_live
+
+    out["Duplicate Of (row idx)"] = dup_flags
+    out["Final Urgency"] = (
+        out["Urgency (1-5)"].astype(int) + out["Detected Urgency Boost"]
+    ).clip(upper=5)
+    return out
 
 
-def citizen_demand_summary():
+# ---------------------------------------------------------------------------
+# Engine B — Contextual Allocator (Top-Down ring-fencing + Bottom-Up split)
+# ---------------------------------------------------------------------------
+
+
+def calculate_ringfenced_projects(
+    population: int,
+    hospital_access: str,
+    school_access: str,
+    budget_ceiling: float,
+) -> list:
+    """Engine B — 'Thatha' Data Verification.
+
+    Injects mandatory Strategic Master Plan projects BEFORE any citizen
+    complaint is parsed, whenever a statutory demographic trigger fires.
     """
-    Aggregate the current complaint set into a structured 'what citizens
-    actually want this cycle' briefing — by ward and by sector, weighted
-    by each complaint's Severity Score (from the Ingestion Agent, or a
-    heuristic default in fallback mode).
-    """
-    complaints = st.session_state.get("complaints", [])
-    if not complaints:
-        return "No citizen suggestions submitted yet this cycle.", {}
+    projects = []
 
-    by_sector = {}
-    by_ward = {}
-    for c in complaints:
-        weight = c.get("severity_score") or (7 if c["priority"] == "High Priority" else 3)
-        by_sector[c["sector"]] = by_sector.get(c["sector"], 0) + weight
-        by_ward[c["ward"]] = by_ward.get(c["ward"], 0) + weight
-
-    total = sum(by_sector.values()) or 1
-    sector_lines = [
-        f"- {sector}: severity-weighted signal {score} — "
-        f"{round(100 * score / total)}% of citizen demand this cycle"
-        for sector, score in sorted(by_sector.items(), key=lambda x: -x[1])
-    ]
-    ward_lines = [
-        f"- {ward}: severity-weighted signal {score}"
-        for ward, score in sorted(by_ward.items(), key=lambda x: -x[1])
-    ]
-    summary_text = (
-        "Citizen demand by sector (Severity Score-weighted):\n"
-        + "\n".join(sector_lines)
-        + "\n\nCitizen demand by ward:\n"
-        + "\n".join(ward_lines)
-    )
-    return summary_text, {"by_sector": by_sector, "by_ward": by_ward}
-
-
-SYNTHETIC_TEMPLATES = [
-    ("Infrastructure", "Nepali", "Yo bato dherai barsha dekhi bigreko cha, gaadi chalauna gaahro bha cha."),
-    ("Infrastructure", "Bhojpuri", "Gaon ke sadak me gaddha ba, durghatna hoit rahal ba har hafta."),
-    ("Social Development", "Maithili", "Skool bhawan ke chhat toot gel ba, barsat me paani tapkait ba."),
-    ("Social Development", "Bhojpuri", "Aspatal me daktar samay pe nai aawe la, mareez pareshan ba."),
-    ("Economic Development", "Nepali", "Haat bazaar ko bhawan jeerna bhaisakeko cha, byapari haru lai samasya bha rako cha."),
-    ("Economic Development", "Maithili", "Sthaniya bajar me saaf-safai aur chhat ke abhav se vyapar prabhavit bha rahal ba."),
-    ("Agriculture & Environment", "Bhojpuri", "Sinchai naali me paani nai aawe la, fasal sukhaa ho rahal ba."),
-    ("Agriculture & Environment", "Nepali", "Baadhi le kheti nasta bhayo, paani niskasan ko byawastha chaina."),
-    ("Governance", "Maithili", "Ward karyalaya me nagarikta aur sifarish banawe me bahut samay lagait ba."),
-    ("Governance", "Nepali", "Ward office ma sewa lina dherai palta dhauna parxa, karmachari samay ma huँdainan."),
-]
-
-
-# --------------------------------------------------------------------------
-# CUSTOM CSS  (dusty, muted palette — no pure/bright white or saturated tones)
-# --------------------------------------------------------------------------
-def inject_css():
-    st.markdown(
-        """
-        <style>
-        .stApp { background-color: #eae7e1; }
-        section[data-testid="stSidebar"] {
-            background-color: #dcd9d2;
-            border-right: 1px solid #c7c3ba;
-        }
-        h1, h2, h3, h4 { color: #3a372f; font-family: 'Segoe UI', sans-serif; }
-        .main-header {
-            background: linear-gradient(90deg, #4b463c 0%, #6e6656 100%);
-            padding: 28px 32px;
-            border-radius: 14px;
-            color: #f0ede4;
-            margin-bottom: 22px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.12);
-        }
-        .main-header h1 { color: #f0ede4; margin: 0; font-size: 30px; }
-        .main-header p { color: #dcd7c9; margin: 6px 0 0 0; font-size: 15px; }
-        .metric-card {
-            background-color: #f2efe8;
-            border: 1px solid #cfc9ba;
-            border-radius: 12px;
-            padding: 18px 20px;
-            box-shadow: 0 1px 4px rgba(0,0,0,0.06);
-        }
-        .complaint-card {
-            background-color: #f2efe8;
-            border: 1px solid #cfc9ba;
-            border-radius: 12px;
-            padding: 14px 18px;
-            margin-bottom: 10px;
-        }
-        .trace-card {
-            background-color: #37352c;
-            color: #d8d3c4;
-            border-radius: 10px;
-            padding: 10px 14px;
-            font-family: 'Consolas', monospace;
-            font-size: 12.5px;
-            margin-bottom: 6px;
-            border-left: 3px solid #8c7a4f;
-        }
-        .conflict-card {
-            background-color: #f2efe8;
-            border-left: 4px solid #8c2f22;
-            border-radius: 8px;
-            padding: 12px 16px;
-            margin-bottom: 8px;
-        }
-        .status-pill {
-            display: inline-block;
-            padding: 3px 12px;
-            border-radius: 999px;
-            font-size: 12px;
-            font-weight: 600;
-            color: #f2efe8;
-        }
-        .pill-pending { background-color: #8a7f5c; }
-        .pill-funded { background-color: #4f7a5a; }
-        .pill-rejected { background-color: #8c4a3c; }
-        .pill-high { background-color: #8c4a3c; }
-        .pill-standard { background-color: #6e6656; }
-        .pill-live { background-color: #2f6b46; }
-        .pill-fallback { background-color: #8a5a2f; }
-        .pill-critical { background-color: #8c2f22; }
-        .pill-moderate { background-color: #8a5a2f; }
-        .pill-low { background-color: #6e6656; }
-        div.stButton > button[kind="primary"] {
-            background-color: #8c2f22 !important;
-            color: #f2efe8 !important;
-            border: none !important;
-            font-weight: 600;
-        }
-        div.stButton > button[kind="primary"]:hover { background-color: #6f241a !important; }
-        .footer-note { color: #6e6656; font-size: 12px; margin-top: 28px; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# --------------------------------------------------------------------------
-# AI CLIENT
-# --------------------------------------------------------------------------
-def get_api_key():
-    try:
-        if "ANTHROPIC_API_KEY" in st.secrets:
-            return st.secrets["ANTHROPIC_API_KEY"]
-    except Exception:
-        pass
-    return os.environ.get("ANTHROPIC_API_KEY")
-
-
-def get_admin_password():
-    try:
-        if "ADMIN_PASSWORD" in st.secrets:
-            return st.secrets["ADMIN_PASSWORD"]
-    except Exception:
-        pass
-    return os.environ.get("ADMIN_PASSWORD", "hellosarkar2026")
-
-
-def get_client():
-    if not ANTHROPIC_SDK_AVAILABLE:
-        return None
-    key = get_api_key()
-    if not key:
-        return None
-    try:
-        return anthropic.Anthropic(api_key=key)
-    except Exception:
-        return None
-
-
-AI_LIVE = get_client() is not None
-
-
-# --------------------------------------------------------------------------
-# SQLITE PERSISTENCE
-# --------------------------------------------------------------------------
-STATE_KEYS = [
-    "complaints", "memos", "projects", "logs", "trace_log",
-    "federal_grant", "provincial_grant", "internal_revenue",
-    "policy_directive", "budget_published", "next_complaint_num",
-    "conflict_flags", "fairness_assessment", "fairness_source",
-]
-
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)")
-    conn.commit()
-    conn.close()
-
-
-def _photo_to_json_safe(complaint):
-    c = dict(complaint)
-    if c.get("photo_bytes"):
-        c["photo_bytes"] = base64.b64encode(c["photo_bytes"]).decode("ascii")
-    return c
-
-
-def _photo_from_json_safe(complaint):
-    c = dict(complaint)
-    if c.get("photo_bytes"):
-        c["photo_bytes"] = base64.b64decode(c["photo_bytes"])
-    return c
-
-
-def save_state():
-    """Persist the durable app state to SQLite so a page refresh or a new
-    session doesn't lose the demo's progress."""
-    payload = {}
-    for key in STATE_KEYS:
-        value = st.session_state.get(key)
-        if key == "complaints" and value is not None:
-            value = [_photo_to_json_safe(c) for c in value]
-        payload[key] = value
-
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "INSERT INTO state (key, value) VALUES ('app_state', ?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (json.dumps(payload),),
-    )
-    conn.commit()
-    conn.close()
-
-
-def load_state():
-    conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("SELECT value FROM state WHERE key = 'app_state'").fetchone()
-    conn.close()
-    if not row:
-        return None
-    payload = json.loads(row[0])
-    if payload.get("complaints"):
-        payload["complaints"] = [_photo_from_json_safe(c) for c in payload["complaints"]]
-    return payload
-
-
-# --------------------------------------------------------------------------
-# SESSION STATE INITIALIZATION
-# --------------------------------------------------------------------------
-def seed_complaint(cid, ward, sector, language, text, days_unresolved,
-                    priority=None, severity_score=None, ai_summary=None,
-                    ai_urgency_reasoning=None, classification_source="fallback"):
-    if priority is None:
-        priority = classify_priority_fallback(text)
-    if severity_score is None:
-        severity_score = 7 if priority == "High Priority" else 3
-    return {
-        "id": cid,
-        "ward": ward,
-        "sector": sector,
-        "language": language,
-        "text": text,
-        "priority": priority,
-        "severity_score": severity_score,
-        "ai_summary": ai_summary,
-        "ai_urgency_reasoning": ai_urgency_reasoning,
-        "classification_source": classification_source,  # "ai" or "fallback"
-        "status": "Pending Review",
-        "days_unresolved": days_unresolved,
-        "submitted_on": (datetime.now() - timedelta(days=days_unresolved)).strftime("%Y-%m-%d"),
-        "funded": None,          # None / True / False
-        "ai_reason": None,
-        "admin_response": "",
-        "override_include": "Yes",
-        "escalated": False,
-        "photo_bytes": None,
-        "photo_name": None,
-    }
-
-
-def classify_priority_fallback(text):
-    lowered = text.lower()
-    if any(word in lowered for word in URGENCY_KEYWORDS) or len(text) > 120:
-        return "High Priority"
-    return "Standard Priority"
-
-
-def default_state():
-    return {
-        "federal_grant": 15_000_000,
-        "provincial_grant": 8_000_000,
-        "internal_revenue": 4_500_000,
-        "policy_directive": (
-            "Prioritize monsoon flood-mitigation infrastructure and irrigation "
-            "resilience across low-lying wards; support agricultural access roads."
-        ),
-        "complaints": [
-            seed_complaint(
-                "CMP-101", "Ward 3", "Infrastructure", "Maithili",
-                "Hamar tolaa mein pani ke pipe bahut din se toot gel ba, pani "
-                "nai aabait ba aur samasya bahut bhayavaha ho gel ba.",
-                10,
-            ),
-            seed_complaint(
-                "CMP-102", "Ward 1", "Infrastructure", "Nepali",
-                "Bato ekdam kharab avastha ma cha, motorcycle chalauna gaahro "
-                "vayeko cha ra baccha haru school jaanay bela dherai samasya huncha.",
-                3,
-            ),
-            seed_complaint(
-                "CMP-103", "Ward 5", "Agriculture & Environment", "Bhojpuri",
-                "Khet me sinchai ke naali dherai purana ba, baarish me paani "
-                "jama ho jaala aur fasal barbaad ho jaala, jaldi thik karwaawa.",
-                12,
-            ),
-            seed_complaint(
-                "CMP-104", "Ward 2", "Social Development", "Nepali",
-                "Swasthya chauki ma udhaharan ausadhi upalabdha chaina, "
-                "biramiharu lai ekdam samasya bha rako cha.",
-                6,
-            ),
-            seed_complaint(
-                "CMP-105", "Ward 4", "Governance", "Maithili",
-                "Ward karyalaya me nagarikta aur sifarish banawe me bahut "
-                "samay lagait ba, karmachari samay pe nai aawe la.",
-                8,
-            ),
-        ],
-        "memos": [
+    if population > 40_000 and hospital_access == "No Secondary Hospital":
+        cost = min(round(budget_ceiling * 0.25, 2), 80_000_000)
+        projects.append(
             {
-                "source": "Nagarain Youth Club",
-                "doc_type": "Dhyanakarshan Letter",
-                "demand": "Request for streetlight installation along the Ward 2 "
-                          "market corridor before winter session.",
-            },
-            {
-                "source": "Ward 4 Farmers' Coalition",
-                "doc_type": "Policy Memo",
-                "demand": "Formal request for canal desiltation ahead of the "
-                          "monsoon planting cycle.",
-            },
-        ],
-        "projects": [],
-        "logs": [],
-        "trace_log": [],
-        "budget_published": False,
-        "next_complaint_num": 106,
-        "conflict_flags": [],
-        "fairness_assessment": None,
-        "fairness_source": None,
-    }
-
-
-def init_session_state():
-    if "initialized" in st.session_state:
-        return
-
-    st.session_state.initialized = True
-    init_db()
-
-    saved = load_state()
-    if saved:
-        for key in STATE_KEYS:
-            st.session_state[key] = saved.get(key, default_state().get(key))
-    else:
-        for key, value in default_state().items():
-            st.session_state[key] = value
-        save_state()
-
-    if "admin_authenticated" not in st.session_state:
-        st.session_state.admin_authenticated = False
-    if "hazard_cache" not in st.session_state:
-        st.session_state.hazard_cache = {}
-
-
-def next_complaint_id():
-    cid = f"CMP-{st.session_state.next_complaint_num}"
-    st.session_state.next_complaint_num += 1
-    return cid
-
-
-def total_revenue_ceiling():
-    return (
-        st.session_state.federal_grant
-        + st.session_state.provincial_grant
-        + st.session_state.internal_revenue
-    )
-
-
-def allocated_expenditure():
-    return sum(p["amount"] for p in st.session_state.projects)
-
-
-def unallocated_reserve():
-    return total_revenue_ceiling() - allocated_expenditure()
-
-
-def fmt_npr(amount):
-    return f"NPR {amount:,.0f}"
-
-
-# --------------------------------------------------------------------------
-# AGENT 1 — INGESTION & NLP AGENT (single structured tool-use call)
-# --------------------------------------------------------------------------
-INGESTION_TOOL = {
-    "name": "classify_complaint",
-    "description": "Analyze a citizen budget complaint and return a structured classification.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "detected_language": {
-                "type": "string",
-                "description": "The language/dialect the complaint is actually written in "
-                                "(Nepali, Maithili, Bhojpuri, or a mix).",
-            },
-            "priority": {
-                "type": "string",
-                "enum": ["High Priority", "Standard Priority"],
-            },
-            "severity_score": {
-                "type": "integer",
-                "description": "An objective 1-10 severity score based on urgency and "
-                                "apparent public impact of this specific complaint.",
-            },
-            "urgency_reasoning": {
-                "type": "string",
-                "description": "1-2 sentences explaining why this priority/score was "
-                                "assigned, referencing specific content in the complaint.",
-            },
-            "summary": {
-                "type": "string",
-                "description": "One-sentence plain-English summary of the complaint.",
-            },
-            "sector_confidence": {
-                "type": "string",
-                "enum": ["matches selected sector", "possible mismatch"],
-                "description": "Whether the complaint content actually matches the sector "
-                                "the citizen selected in the form.",
-            },
-        },
-        "required": [
-            "detected_language", "priority", "severity_score",
-            "urgency_reasoning", "summary", "sector_confidence",
-        ],
-    },
-}
-
-
-def ai_classify_complaint(text, selected_sector, selected_language):
-    """Real agent call. Returns (result_dict, source) where source is
-    'ai' on success or 'fallback' if no key / call failed."""
-    client = get_client()
-    if client is None:
-        return _fallback_classification(text), "fallback"
-
-    try:
-        response = client.messages.create(
-            model=MODEL_NAME,
-            max_tokens=500,
-            tools=[INGESTION_TOOL],
-            tool_choice={"type": "tool", "name": "classify_complaint"},
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"A citizen in Nagarain Municipality, Dhanusa, Nepal submitted this "
-                    f"budget complaint via a form where they selected sector "
-                    f"'{selected_sector}' and language '{selected_language}':\n\n"
-                    f"\"{text}\"\n\n"
-                    f"Classify it using the classify_complaint tool."
+                "Project Name": "Secondary Hospital Construction (Statutory Mandate)",
+                "Sector": "Social",
+                "Ward": "Municipality-Wide",
+                "Origin": "Ring-Fenced Mandate",
+                "Urgency": 5,
+                "Allocated Amount (NPR)": cost,
+                "Trigger": (
+                    f"Population {population:,} > 40,000 AND zero secondary "
+                    "hospitals within health-service radius"
                 ),
-            }],
+            }
         )
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "classify_complaint":
-                return block.input, "ai"
-        return _fallback_classification(text), "fallback"
-    except Exception:
-        return _fallback_classification(text), "fallback"
 
-
-def _fallback_classification(text):
-    priority = classify_priority_fallback(text)
-    return {
-        "detected_language": "Unable to verify (fallback mode)",
-        "priority": priority,
-        "severity_score": 7 if priority == "High Priority" else 3,
-        "urgency_reasoning": "Heuristic fallback: keyword/length match, no live model call.",
-        "summary": text[:100] + ("..." if len(text) > 100 else ""),
-        "sector_confidence": "not evaluated (fallback mode)",
-    }
-
-
-# --------------------------------------------------------------------------
-# AGENT 1b — SCANNED MEMO OCR (Ingestion Agent, image variant)
-# --------------------------------------------------------------------------
-MEMO_OCR_TOOL = {
-    "name": "extract_memo",
-    "description": "Extract structured information from a photographed memo, petition, "
-                    "or ward-assembly minute sheet.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "source_entity": {"type": "string", "description": "Who sent/wrote this document."},
-            "document_type": {
-                "type": "string",
-                "enum": ["Dhyanakarshan Letter", "Policy Memo", "Petition", "Ward Assembly Minutes"],
-            },
-            "extracted_demand": {
-                "type": "string",
-                "description": "Plain-English summary of what is being requested.",
-            },
-            "detected_language": {"type": "string"},
-        },
-        "required": ["source_entity", "document_type", "extracted_demand", "detected_language"],
-    },
-}
-
-
-def ai_extract_memo_from_image(image_bytes, media_type):
-    """Real OCR-via-vision call. Returns a structured dict on success, or
-    None if no live backend / the call failed (caller falls back to a
-    placeholder extraction)."""
-    client = get_client()
-    if client is None:
-        return None
-    try:
-        b64 = base64.b64encode(image_bytes).decode("ascii")
-        response = client.messages.create(
-            model=MODEL_NAME,
-            max_tokens=600,
-            tools=[MEMO_OCR_TOOL],
-            tool_choice={"type": "tool", "name": "extract_memo"},
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
-                    {"type": "text", "text": (
-                        "This is a photographed memo, petition, or ward-assembly minute "
-                        "sheet submitted to Nagarain Municipality. Extract its content "
-                        "using the extract_memo tool."
-                    )},
-                ],
-            }],
+    if population > 25_000 and school_access == "No Secondary/High School":
+        cost = min(round(budget_ceiling * 0.12, 2), 40_000_000)
+        projects.append(
+            {
+                "Project Name": "Secondary/High School Construction (Statutory Mandate)",
+                "Sector": "Social",
+                "Ward": "Municipality-Wide",
+                "Origin": "Ring-Fenced Mandate",
+                "Urgency": 5,
+                "Allocated Amount (NPR)": cost,
+                "Trigger": (
+                    f"Population {population:,} > 25,000 AND no secondary/"
+                    "high school facility present"
+                ),
+            }
         )
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "extract_memo":
-                return block.input
-    except Exception:
-        return None
-    return None
+
+    return projects
 
 
-# --------------------------------------------------------------------------
-# AGENT 2 — CONTEXT-AWARE ALLOCATION AGENT (multi-step agentic tool-use loop)
-# --------------------------------------------------------------------------
-ALLOCATION_TOOLS = [
-    {
-        "name": "get_remaining_budget",
-        "description": "Check how much capital budget (NPR) is still unallocated this cycle.",
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "fund_project",
-        "description": "Allocate budget to a capital project addressing a specific complaint.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "complaint_id": {"type": "string"},
-                "project_name": {"type": "string"},
-                "amount": {"type": "number", "description": "Amount in NPR, must not exceed remaining budget."},
-                "justification": {
-                    "type": "string",
-                    "description": "Why this project was funded — reference the policy "
-                                    "directive, ward hazard data, and citizen demand signal.",
-                },
-            },
-            "required": ["complaint_id", "project_name", "amount", "justification"],
-        },
-    },
-    {
-        "name": "defer_complaint",
-        "description": "Defer or reject a complaint for this budget cycle.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "complaint_id": {"type": "string"},
-                "reason": {"type": "string"},
-            },
-            "required": ["complaint_id", "reason"],
-        },
-    },
-    {
-        "name": "finish_allocation",
-        "description": "Call this once every complaint has been either funded or deferred.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"closing_note": {"type": "string"}},
-            "required": ["closing_note"],
-        },
-    },
-]
+def run_contextual_allocator(
+    complaints_df: pd.DataFrame,
+    population: int,
+    hospital_access: str,
+    school_access: str,
+    budget_ceiling: float,
+) -> tuple:
+    """Full Contextual Allocator Agent pipeline (Steps 1-4)."""
 
-
-def run_ai_allocation_engine():
-    """
-    Agentic loop: the model is given full context once — including LIVE
-    hazard data — then repeatedly calls tools to check remaining budget and
-    fund/defer each complaint, until it calls finish_allocation or a safety
-    turn-limit is hit. The app — not the model — enforces the hard budget
-    ceiling.
-    """
-    client = get_client()
-    if client is None:
-        return run_fallback_allocation_engine()
-
-    complaints_by_id = {c["id"]: c for c in st.session_state.complaints}
-    open_complaints = [c for c in st.session_state.complaints if c["override_include"] == "Yes"]
-    excluded_complaints = [c for c in st.session_state.complaints if c["override_include"] == "No"]
-
-    remaining_budget = {"amount": total_revenue_ceiling()}
-    projects = []
-    trace = []
-    logs = []
-
-    # Manual overrides are enforced by the app, not the model.
-    for c in excluded_complaints:
-        c["status"] = "Budget Concluded"
-        c["funded"] = False
-        reason = "Excluded from this budget cycle per municipal override decision."
-        if c["admin_response"]:
-            reason += f" Municipal note: {c['admin_response']}"
-        c["ai_reason"] = reason
-        logs.append(f"[ALERT] {c['id']} status -> Budget Concluded — REJECTED (manual override)")
-
-    if not open_complaints:
-        st.session_state.projects = projects
-        st.session_state.logs.extend(logs)
-        st.session_state.trace_log.extend(trace)
-        return "ai", trace
-
-    complaint_summaries = "\n".join(
-        f"- {c['id']} | Ward: {c['ward']} | Sector: {c['sector']} | "
-        f"Priority: {c['priority']} | Severity Score: {c.get('severity_score', 'n/a')}/10 | "
-        f"Days unresolved: {c['days_unresolved']} | Text: \"{c['text']}\""
-        for c in open_complaints
+    # STEP 1: Mandatory ring-fencing (Top-Down, runs first)
+    ringfenced = calculate_ringfenced_projects(
+        population, hospital_access, school_access, budget_ceiling
     )
-    memo_summaries = "\n".join(
-        f"- {m['source']} ({m['doc_type']}): {m['demand']}" for m in st.session_state.memos
-    ) or "(no memos ingested)"
+    ringfenced_total = sum(p["Allocated Amount (NPR)"] for p in ringfenced)
 
-    demand_summary_text, _ = citizen_demand_summary()
-    geo_summary_text, hazard_is_live = ward_profile_summary()
+    critical_warning = None
+    if ringfenced_total > budget_ceiling * 0.6:
+        capped_total = budget_ceiling * 0.6
+        scale = capped_total / ringfenced_total if ringfenced_total else 0
+        for p in ringfenced:
+            p["Allocated Amount (NPR)"] = round(p["Allocated Amount (NPR)"] * scale, 2)
+        ringfenced_total = capped_total
+        critical_warning = (
+            "CRITICAL: Ring-fenced statutory mandates exceeded the Total "
+            "Budget Ceiling and were scaled down to a 60% cap for fiscal "
+            "feasibility. Municipality should seek supplementary/"
+            "intergovernmental fiscal transfer."
+        )
 
-    system_prompt = (
-        "You are the Context-Aware Allocation Agent for Nagarain Municipality, "
-        "Dhanusa, Madhesh Province, Nepal. Many mayors in Nepal serve only one "
-        "5-year term and have no prior experience building a municipal capital "
-        "budget — you exist to give them a defensible, hazard-aware, "
-        "evidence-based starting allocation, not a generic one. You must "
-        "decide how to allocate the available capital budget across open "
-        "citizen complaints. Use the tools provided: check "
-        "get_remaining_budget before large decisions, call fund_project or "
-        "defer_complaint for EVERY open complaint exactly once, and call "
-        "finish_allocation when done. Never propose an amount larger than "
-        "the remaining budget.\n\n"
-        "Ground every funding decision in THREE things, and name which ones "
-        "applied in the justification field:\n"
-        "1. The specific ward's LIVE hazard/flood-risk data below — a "
-        "complaint from a ward with a high live precipitation forecast and "
-        "weak existing infrastructure should generally outrank an "
-        "equivalent complaint from a lower-risk ward, all else equal.\n"
-        "2. The aggregate citizen demand signal below — sectors and wards "
-        "where citizens are collectively asking loudest (higher combined "
-        "Severity Score) should be weighted higher, not just the individual "
-        "complaint in isolation.\n"
-        "3. The Mayor's policy directive and any ingested memos.\n"
-        "Do not use generic boilerplate language — reference the actual "
-        "hazard numbers and demand figures given to you."
-    )
+    # STEP 2: Remaining budget
+    remaining_budget = max(budget_ceiling - ringfenced_total, 0)
 
-    user_prompt = (
-        f"Total Revenue Ceiling: {fmt_npr(total_revenue_ceiling())}\n\n"
-        f"Mayor's Policy Directive:\n{st.session_state.policy_directive}\n\n"
-        f"Ward Geographic / Hazard Profiles "
-        f"({'LIVE Open-Meteo data' if hazard_is_live else 'fallback baseline — live API unavailable'}):\n"
-        f"{geo_summary_text}\n\n"
-        f"Aggregate Citizen Demand This Cycle (from Bajet Niti Karyakram "
-        f"Sambandhi Sujhav Sankalan submissions):\n{demand_summary_text}\n\n"
-        f"Ingested Memos:\n{memo_summaries}\n\n"
-        f"Open Complaints (each must be funded or deferred):\n{complaint_summaries}\n\n"
-        f"Begin the allocation process now."
-    )
+    # STEP 3: Sector-weighted distribution
+    sector_weights = {s: 0.0 for s in SECTORS}
+    for _, row in complaints_df.iterrows():
+        sector = row["Sector"] if row["Sector"] in SECTORS else "Governance"
+        sector_weights[sector] += float(row.get("Final Urgency", row.get("Urgency (1-5)", 1)))
 
-    messages = [{"role": "user", "content": user_prompt}]
-    max_turns = 25
-    turn = 0
+    total_weight = sum(sector_weights.values())
+    statutory_floor = 0.03 * remaining_budget
+    sector_allocations = {}
 
-    try:
-        while turn < max_turns:
-            turn += 1
-            response = client.messages.create(
-                model=MODEL_NAME,
-                max_tokens=1500,
-                system=system_prompt,
-                tools=ALLOCATION_TOOLS,
-                messages=messages,
-            )
+    if total_weight <= 0:
+        # No complaints at all: split evenly.
+        for s in SECTORS:
+            sector_allocations[s] = remaining_budget / len(SECTORS)
+    else:
+        # First pass: proportional split.
+        raw_alloc = {
+            s: (sector_weights[s] / total_weight) * remaining_budget for s in SECTORS
+        }
+        # Enforce statutory floor by clawing back proportionally from
+        # sectors that are above the floor.
+        below_floor = {s: v for s, v in raw_alloc.items() if v < statutory_floor}
+        shortfall = sum(statutory_floor - v for v in below_floor.values())
+        above_floor = {s: v for s, v in raw_alloc.items() if s not in below_floor}
+        above_total = sum(above_floor.values())
+        for s in SECTORS:
+            if s in below_floor:
+                sector_allocations[s] = statutory_floor
+            else:
+                claw = (raw_alloc[s] / above_total) * shortfall if above_total else 0
+                sector_allocations[s] = max(raw_alloc[s] - claw, 0)
 
-            messages.append({"role": "assistant", "content": response.content})
+    # STEP 4: Within-sector, per-complaint allocation
+    line_items = []
+    for s in SECTORS:
+        sector_rows = complaints_df[
+            complaints_df["Sector"].apply(lambda x: x if x in SECTORS else "Governance") == s
+        ]
+        sector_budget = sector_allocations[s]
+        sector_urgency_sum = sector_rows.get(
+            "Final Urgency", sector_rows.get("Urgency (1-5)", pd.Series(dtype=float))
+        ).sum()
 
-            if response.stop_reason != "tool_use":
-                break
-
-            tool_results = []
-            finished = False
-
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
-
-                if block.name == "get_remaining_budget":
-                    result_text = json.dumps({"remaining_budget": remaining_budget["amount"]})
-                    trace.append(f"🔍 get_remaining_budget → {fmt_npr(remaining_budget['amount'])}")
-
-                elif block.name == "fund_project":
-                    args = block.input
-                    cid = args.get("complaint_id")
-                    amount = float(args.get("amount", 0))
-                    c = complaints_by_id.get(cid)
-
-                    if c is None:
-                        result_text = json.dumps({"error": f"Unknown complaint_id {cid}"})
-                        trace.append(f"⚠️ fund_project failed — unknown complaint {cid}")
-                    elif amount > remaining_budget["amount"]:
-                        result_text = json.dumps({
-                            "error": "Amount exceeds remaining budget",
-                            "remaining_budget": remaining_budget["amount"],
-                        })
-                        trace.append(
-                            f"⚠️ fund_project rejected for {cid} — requested "
-                            f"{fmt_npr(amount)} exceeds remaining {fmt_npr(remaining_budget['amount'])}"
-                        )
-                    else:
-                        remaining_budget["amount"] -= amount
-                        project_name = args.get("project_name", f"{c['ward']} {c['sector']} Project")
-                        justification = args.get("justification", "")
-                        projects.append({
-                            "project_name": project_name,
-                            "ward": c["ward"],
-                            "sector": c["sector"],
-                            "amount": amount,
-                            "justification": justification,
-                            "linked_complaint": cid,
-                        })
-                        c["status"] = "Budget Concluded"
-                        c["funded"] = True
-                        c["ai_reason"] = justification
-                        logs.append(f"[ALERT] {cid} status -> Budget Concluded — FUNDED ({fmt_npr(amount)})")
-                        trace.append(f"✅ fund_project({cid}) → {project_name} — {fmt_npr(amount)}")
-                        result_text = json.dumps({
-                            "success": True,
-                            "remaining_budget": remaining_budget["amount"],
-                        })
-
-                elif block.name == "defer_complaint":
-                    args = block.input
-                    cid = args.get("complaint_id")
-                    reason = args.get("reason", "Deferred by allocation agent.")
-                    c = complaints_by_id.get(cid)
-                    if c is not None:
-                        c["status"] = "Budget Concluded"
-                        c["funded"] = False
-                        c["ai_reason"] = reason
-                        logs.append(f"[ALERT] {cid} status -> Budget Concluded — DEFERRED")
-                        trace.append(f"⏸️ defer_complaint({cid}) — {reason[:80]}")
-                        result_text = json.dumps({"success": True})
-                    else:
-                        result_text = json.dumps({"error": f"Unknown complaint_id {cid}"})
-
-                elif block.name == "finish_allocation":
-                    closing_note = block.input.get("closing_note", "")
-                    trace.append(f"🏁 finish_allocation — {closing_note}")
-                    finished = True
-                    result_text = json.dumps({"success": True})
-
-                else:
-                    result_text = json.dumps({"error": "unknown tool"})
-
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result_text,
-                })
-
-            messages.append({"role": "user", "content": tool_results})
-
-            if finished:
-                break
-
-        # Safety net: any open complaint the model never touched gets
-        # deferred rather than silently vanishing.
-        for c in open_complaints:
-            if c["status"] != "Budget Concluded":
-                c["status"] = "Budget Concluded"
-                c["funded"] = False
-                c["ai_reason"] = "Not reached by the allocation agent within the turn limit; deferred for the next cycle."
-                logs.append(f"[ALERT] {c['id']} status -> Budget Concluded — DEFERRED (turn limit)")
-                trace.append(f"⏸️ safety-net defer_complaint({c['id']}) — turn limit reached")
-
-        st.session_state.projects = projects
-        st.session_state.logs.extend(logs)
-        st.session_state.trace_log.extend(trace)
-        return "ai", trace
-
-    except Exception as exc:
-        st.session_state.trace_log.append(f"⚠️ Live AI allocation failed ({exc}) — falling back to simulation.")
-        return run_fallback_allocation_engine()
-
-
-def run_fallback_allocation_engine():
-    """Deterministic simulation used when no API key is configured or the
-    live call fails. Clearly logged as fallback mode — never presented as AI."""
-    projects = []
-    logs = []
-    trace = ["⚠️ FALLBACK MODE — no live AI backend; using seeded simulation logic."]
-    remaining_budget = total_revenue_ceiling()
-    random.seed(42)
-
-    ordered = sorted(
-        st.session_state.complaints,
-        key=lambda c: (c["priority"] != "High Priority", -c["days_unresolved"]),
-    )
-
-    for c in ordered:
-        if c["override_include"] == "No":
-            c["status"] = "Budget Concluded"
-            c["funded"] = False
-            reason = "Excluded from this budget cycle per municipal override decision."
-            if c["admin_response"]:
-                reason += f" Municipal note: {c['admin_response']}"
-            c["ai_reason"] = reason
-            logs.append(f"[ALERT] {c['id']} status -> Budget Concluded — REJECTED (manual override)")
-            trace.append(f"⏸️ [fallback] excluded {c['id']} (manual override)")
+        if len(sector_rows) == 0 or sector_urgency_sum <= 0:
             continue
 
-        proposed_amount = random.randint(500_000, 3_200_000)
-
-        if proposed_amount <= remaining_budget:
-            remaining_budget -= proposed_amount
-            climate_note = random.choice(CLIMATE_JUSTIFICATIONS)
-            project_name = f"{c['ward']} {c['sector']} Improvement Initiative"
-            justification = (
-                f"{climate_note} and matches public complaint {c['id']}. "
-                f"Aligned with Mayor's directive: "
-                f"\"{st.session_state.policy_directive[:80]}...\""
-            )
-            projects.append({
-                "project_name": project_name,
-                "ward": c["ward"],
-                "sector": c["sector"],
-                "amount": proposed_amount,
-                "justification": justification,
-                "linked_complaint": c["id"],
-            })
-            c["status"] = "Budget Concluded"
-            c["funded"] = True
-            c["ai_reason"] = justification
-            logs.append(f"[ALERT] {c['id']} status -> Budget Concluded — FUNDED ({fmt_npr(proposed_amount)})")
-            trace.append(f"✅ [fallback] fund {c['id']} — {fmt_npr(proposed_amount)}")
-        else:
-            c["status"] = "Budget Concluded"
-            c["funded"] = False
-            c["ai_reason"] = (
-                "Deferred due to conditional federal grant restrictions and "
-                "insufficient remaining contingency reserve for this cycle."
-            )
-            logs.append(f"[ALERT] {c['id']} status -> Budget Concluded — DEFERRED (insufficient reserve)")
-            trace.append(f"⏸️ [fallback] defer {c['id']} — insufficient reserve")
-
-    st.session_state.projects = projects
-    st.session_state.logs.extend(logs)
-    st.session_state.trace_log.extend(trace)
-    return "fallback", trace
-
-
-# --------------------------------------------------------------------------
-# AGENT 3 — INDEPENDENT AUDITOR & FAIRNESS AGENT
-# --------------------------------------------------------------------------
-FAIRNESS_TOOL = {
-    "name": "report_fairness_findings",
-    "description": "Report fairness/conflict findings after comparing manual overrides "
-                    "and final allocation decisions against objective citizen demand data.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "conflicts": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "complaint_id": {"type": "string"},
-                        "ward": {"type": "string"},
-                        "sector": {"type": "string"},
-                        "severity": {"type": "string", "enum": ["Critical", "Moderate", "Low"]},
-                        "finding": {"type": "string"},
-                        "recommendation": {"type": "string"},
-                    },
-                    "required": ["complaint_id", "ward", "sector", "severity", "finding", "recommendation"],
-                },
-            },
-            "overall_assessment": {"type": "string"},
-        },
-        "required": ["conflicts", "overall_assessment"],
-    },
-}
-
-
-def run_fairness_audit():
-    """
-    Agent 3. Runs AFTER the allocation engine. Compares the final decisions
-    — including manual official overrides — against the objective citizen
-    demand data, and raises Conflict Flags for anything that looks like a
-    high-need ward/sector was starved to fund a lower-priority one.
-    """
-    client = get_client()
-    complaints = st.session_state.complaints
-    demand_text, _ = citizen_demand_summary()
-
-    decisions_text = "\n".join(
-        f"- {c['id']} | Ward: {c['ward']} | Sector: {c['sector']} | "
-        f"Severity Score: {c.get('severity_score', 'n/a')}/10 | "
-        f"Manual Override: {c['override_include']} | "
-        f"Outcome: {'FUNDED' if c['funded'] else ('DEFERRED/REJECTED' if c['funded'] is False else 'PENDING')} | "
-        f"Admin note: {c['admin_response'] or '(none)'}"
-        for c in complaints
-    )
-
-    if client is None:
-        return run_fallback_fairness_audit()
-
-    try:
-        response = client.messages.create(
-            model=MODEL_NAME,
-            max_tokens=1200,
-            tools=[FAIRNESS_TOOL],
-            tool_choice={"type": "tool", "name": "report_fairness_findings"},
-            messages=[{
-                "role": "user",
-                "content": (
-                    "You are the Independent Auditor and Fairness Agent for Nagarain "
-                    "Municipality's capital budget. Compare the final allocation "
-                    "decisions (including any manual official overrides) against the "
-                    "objective citizen demand data. Flag any case where a high-severity, "
-                    "high-demand ward or sector was excluded, deferred, or underfunded "
-                    "in favor of a lower-priority one — especially where a manual "
-                    "override (not the allocation agent) caused it. If nothing looks "
-                    "unfair, return an empty conflicts array and say so plainly in "
-                    "overall_assessment.\n\n"
-                    f"Aggregate Citizen Demand:\n{demand_text}\n\n"
-                    f"Final Allocation Decisions:\n{decisions_text}\n\n"
-                    "Run the audit now."
-                ),
-            }],
-        )
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "report_fairness_findings":
-                return {"source": "ai", **block.input}
-        return run_fallback_fairness_audit()
-    except Exception:
-        return run_fallback_fairness_audit()
-
-
-def run_fallback_fairness_audit():
-    """Deterministic heuristic used when no live AI backend is available:
-    flags any complaint manually excluded (override_include == 'No')
-    despite being High Priority and unresolved 7+ days."""
-    conflicts = []
-    for c in st.session_state.complaints:
-        if c["override_include"] == "No" and c["priority"] == "High Priority" and c["days_unresolved"] >= 7:
-            conflicts.append({
-                "complaint_id": c["id"],
-                "ward": c["ward"],
-                "sector": c["sector"],
-                "severity": "Critical",
-                "finding": (
-                    f"{c['id']} is a High Priority complaint (severity "
-                    f"{c.get('severity_score', 'n/a')}/10) unresolved for "
-                    f"{c['days_unresolved']} days, but was manually excluded via "
-                    f"admin override rather than evaluated by the allocation agent."
-                ),
-                "recommendation": "Review this override decision before finalizing the budget.",
-            })
-    assessment = (
-        f"[Fallback heuristic] {len(conflicts)} potential conflict(s) found."
-        if conflicts else
-        "[Fallback heuristic] No obvious conflicts detected between manual overrides and complaint severity."
-    )
-    return {"source": "fallback", "conflicts": conflicts, "overall_assessment": assessment}
-
-
-# --------------------------------------------------------------------------
-# HELLO SARKAR HAND-OFF
-# --------------------------------------------------------------------------
-def render_hello_sarkar_redirect(c):
-    """
-    Show the prepared complaint packet plus two real forwarding routes:
-      1. The official Hello Sarkar grievance portal (gunaso.opmcm.gov.np).
-      2. A WhatsApp click-to-chat link to Hello Sarkar's published number
-         (+977 985-1145045), pre-filled with the full complaint text.
-    """
-    st.markdown("##### 📦 Prepared Complaint Packet (copy into Hello Sarkar)")
-    packet = (
-        f"Tracking ID: {c['id']}\n"
-        f"Municipality: Nagarain Municipality, Dhanusa, Madhesh Province\n"
-        f"Ward: {c['ward']}\n"
-        f"Sector: {c['sector']}\n"
-        f"Language: {c['language']}\n"
-        f"Days Unresolved: {c['days_unresolved']}\n"
-        f"Original Complaint: {c['text']}\n"
-        f"Municipal Outcome: REJECTED / DEFERRED\n"
-        f"AI / Municipal Reason: {c['ai_reason'] or 'Not provided'}\n"
-    )
-    st.code(packet, language="text")
-
-    if c.get("photo_bytes"):
-        st.markdown("##### 📷 Attached Photo")
-        st.image(c["photo_bytes"], caption=c.get("photo_name", "complaint_photo"), width=280)
-        st.caption(
-            "⚠️ WhatsApp and the Hello Sarkar portal can't pull this photo in "
-            "automatically — attach it manually in the chat / upload form "
-            "after opening the link below."
-        )
-
-    whatsapp_text = quote(f"Hello Sarkar Complaint Forward — Bajet Sunuwai\n\n{packet}")
-    whatsapp_url = f"https://wa.me/{HELLO_SARKAR_WHATSAPP_NUMBER}?text={whatsapp_text}"
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown(
-            f"""
-            <a href="{whatsapp_url}" target="_blank">
-                <button style="background-color:#25703f;color:#f2efe8;border:none;
-                padding:10px 18px;border-radius:8px;font-weight:600;cursor:pointer;width:100%;">
-                    💬 Send via WhatsApp to Hello Sarkar (+977 985-1145045)
-                </button>
-            </a>
-            """,
-            unsafe_allow_html=True,
-        )
-    with col_b:
-        st.markdown(
-            f"""
-            <a href="{HELLO_SARKAR_PORTAL_URL}" target="_blank">
-                <button style="background-color:#8c2f22;color:#f2efe8;border:none;
-                padding:10px 18px;border-radius:8px;font-weight:600;cursor:pointer;width:100%;">
-                    🔗 Open Hello Sarkar Portal
-                </button>
-            </a>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    st.caption(
-        "The WhatsApp button opens a chat with Hello Sarkar's published number "
-        "with the complaint text already filled in — just attach the photo above "
-        "(if any) and hit send. Neither route supports auto-attaching a photo; "
-        "that step stays manual on both platforms."
-    )
-
-
-# --------------------------------------------------------------------------
-# PUBLIC CITIZEN PORTAL
-# --------------------------------------------------------------------------
-def render_public_portal():
-    st.markdown(
-        """
-        <div class="main-header">
-            <h1>👤 Bajet Niti Karyakram Sambandhi Sujhav Sankalan</h1>
-            <p>Public Budget Suggestions Portal — Nagarain Municipality, Dhanusa</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    with st.expander("✍️ Submit a New Suggestion / Complaint", expanded=True):
-        with st.form("citizen_suggestion_form", clear_on_submit=True):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                ward = st.selectbox("Target Ward", WARDS)
-            with col2:
-                sector = st.selectbox("Sector", SECTORS)
-            with col3:
-                language = st.selectbox("Language", LANGUAGES)
-
-            text = st.text_area(
-                "Describe your suggestion or complaint (in your own dialect)",
-                placeholder="Type in Nepali, Maithili, or Bhojpuri...",
-                height=120,
-            )
-            photo = st.file_uploader(
-                "Attach a photo (optional)",
-                type=["jpg", "jpeg", "png"],
-                key="citizen_photo_upload",
-            )
-            submitted = st.form_submit_button("📤 Submit to AI Ingestion Agent", type="primary")
-
-        if submitted:
-            if not text.strip():
-                st.warning("Please enter some text before submitting.")
-            else:
-                with st.spinner("AI Ingestion Agent is analyzing your submission..."):
-                    result, source = ai_classify_complaint(text.strip(), sector, language)
-
-                new_id = next_complaint_id()
-                complaint = seed_complaint(
-                    new_id, ward, sector, language, text.strip(), 0,
-                    priority=result["priority"],
-                    severity_score=result.get("severity_score"),
-                    ai_summary=result.get("summary"),
-                    ai_urgency_reasoning=result.get("urgency_reasoning"),
-                    classification_source=source,
-                )
-                if photo is not None:
-                    complaint["photo_bytes"] = photo.getvalue()
-                    complaint["photo_name"] = photo.name
-                st.session_state.complaints.append(complaint)
-                save_state()
-
-                mode_badge = "🟢 Live AI" if source == "ai" else "🟠 Fallback Simulation"
-                st.success(
-                    f"✅ AI Ingestion Agent processed your entry. ({mode_badge})\n\n"
-                    f"**Tracking ID:** `{new_id}`  \n"
-                    f"**Detected Language:** {result['detected_language']}  \n"
-                    f"**Priority Flag:** {complaint['priority']} "
-                    f"(Severity Score: {complaint['severity_score']}/10)  \n"
-                    f"**Reasoning:** {result['urgency_reasoning']}"
-                )
-
-    st.markdown("### 📊 Live Transparency Matrix")
-    st.caption(
-        "Track every citizen suggestion from ingestion through municipal "
-        "budget review and final outcome."
-    )
-
-    if not st.session_state.complaints:
-        st.info("No complaints have been filed yet.")
-        return
-
-    for c in st.session_state.complaints:
-        pill_class = "pill-high" if c["priority"] == "High Priority" else "pill-standard"
-        header = (
-            f"{c['id']} — {c['sector']} — {c['ward']} "
-            f"({c['language']}) | {c['priority']}"
-        )
-        with st.expander(header):
-            st.markdown(
-                f"""
-                <div class="complaint-card">
-                    <b>Submitted:</b> {c['submitted_on']} &nbsp;&nbsp;
-                    <b>Days Unresolved:</b> {c['days_unresolved']} &nbsp;&nbsp;
-                    <span class="status-pill {pill_class}">{c['priority']} ({c.get('severity_score','n/a')}/10)</span>
-                    <br><br>
-                    <i>"{c['text']}"</i>
-                </div>
-                """,
-                unsafe_allow_html=True,
+        for _, row in sector_rows.iterrows():
+            urgency = float(row.get("Final Urgency", row.get("Urgency (1-5)", 1)))
+            share = urgency / sector_urgency_sum
+            amount = round(sector_budget * share, 2)
+            complaint_preview = str(row.get("Complaint (raw, multi-dialect)", ""))[:60]
+            line_items.append(
+                {
+                    "Project Name": f"Ward {row['Ward']} — {s}: {complaint_preview}...",
+                    "Sector": s,
+                    "Ward": row["Ward"],
+                    "Origin": "Citizen-Driven",
+                    "Urgency": urgency,
+                    "Allocated Amount (NPR)": amount,
+                    "Trigger": "Citizen Tole Bhela complaint",
+                }
             )
 
-            if c.get("ai_summary"):
-                source_pill = "pill-live" if c.get("classification_source") == "ai" else "pill-fallback"
-                source_label = "🟢 Live AI" if c.get("classification_source") == "ai" else "🟠 Fallback"
-                st.markdown(
-                    f"""<span class="status-pill {source_pill}">{source_label}</span>""",
-                    unsafe_allow_html=True,
-                )
-                st.caption(f"**AI Summary:** {c['ai_summary']}")
-                st.caption(f"**Urgency Reasoning:** {c['ai_urgency_reasoning']}")
+    all_projects = ringfenced + line_items
+    return all_projects, sector_allocations, ringfenced_total, remaining_budget, critical_warning
 
-            if c.get("photo_bytes"):
-                st.image(c["photo_bytes"], caption=c.get("photo_name", "attached photo"), width=220)
 
-            if not st.session_state.budget_published:
-                st.info(
-                    "🕓 The municipal assembly is reviewing your data. "
-                    "You will be notified once the budget is finalized."
-                )
-            else:
-                if c["funded"] is True:
-                    st.markdown(
-                        """<span class="status-pill pill-funded">SUCCESS — FUNDED</span>""",
-                        unsafe_allow_html=True,
+# ---------------------------------------------------------------------------
+# Independent Auditor Agent (simulated)
+# ---------------------------------------------------------------------------
+
+
+def run_independent_auditor(
+    projects: list,
+    budget_ceiling: float,
+    population: int,
+    hospital_access: str,
+    school_access: str,
+    critical_warning: str,
+) -> list:
+    log = []
+    projects_df = pd.DataFrame(projects)
+
+    # CHECK 1 — Political / Ward bias
+    if not projects_df.empty:
+        ward_totals = projects_df.groupby("Ward")["Allocated Amount (NPR)"].sum()
+        flagged_wards = ward_totals[ward_totals > 0.30 * budget_ceiling]
+        # Exclude municipality-wide ring-fenced mandates from ward-bias check
+        flagged_wards = flagged_wards[flagged_wards.index != "Municipality-Wide"]
+        if len(flagged_wards) > 0:
+            for ward, amt in flagged_wards.items():
+                log.append(
+                    (
+                        "FLAGGED",
+                        f"Check 1 (Ward Bias): Ward {ward} receives NPR "
+                        f"{amt:,.2f} ({amt / budget_ceiling:.1%} of ceiling) "
+                        "— exceeds 30% threshold without a ring-fenced mandate "
+                        "justification.",
                     )
-                    st.write(f"**AI Explanation:** {c['ai_reason']}")
-                    if c["admin_response"]:
-                        st.write(f"**Municipal Note:** {c['admin_response']}")
-                else:
-                    st.markdown(
-                        """<span class="status-pill pill-rejected">REJECTED / DEFERRED</span>""",
-                        unsafe_allow_html=True,
-                    )
-                    st.write(f"**AI Explanation:** {c['ai_reason'] or 'Awaiting municipal review.'}")
-                    if c["admin_response"]:
-                        st.write(f"**Municipal Note:** {c['admin_response']}")
-
-                # --- Hello Sarkar Escalation ---
-                not_succeeded = c["funded"] is False
-                if not_succeeded:
-                    st.markdown("---")
-                    if c["escalated"]:
-                        st.error(
-                            "🚨 This complaint has already been forwarded to the "
-                            "**Central Hello Sarkar Prime Minister's Dashboard**."
-                        )
-                        render_hello_sarkar_redirect(c)
-                    else:
-                        if c["days_unresolved"] >= 7:
-                            st.warning(
-                                "⚠️ This complaint was **not successful** and has been "
-                                f"unresolved for {c['days_unresolved']} days — eligible "
-                                "for priority escalation."
-                            )
-                        else:
-                            st.warning(
-                                "⚠️ This complaint was **not successful** "
-                                "(REJECTED / DEFERRED). You may forward it directly "
-                                "to Hello Sarkar for central review."
-                            )
-
-                        if st.button(
-                            f"📤 Share {c['id']} to Hello Sarkar",
-                            key=f"escalate_{c['id']}",
-                            type="primary",
-                        ):
-                            c["escalated"] = True
-                            st.session_state.logs.append(
-                                f"[ESCALATION] {c['id']} forwarded to Central Hello Sarkar "
-                                f"PM Dashboard — data packet, local budget caps, and "
-                                f"multi-year failure logs transmitted."
-                            )
-                            save_state()
-                            st.rerun()
-
-
-# --------------------------------------------------------------------------
-# ADMIN AUTH GATE
-# --------------------------------------------------------------------------
-def render_admin_login():
-    st.markdown(
-        """
-        <div class="main-header">
-            <h1>🔒 Municipal Admin Login</h1>
-            <p>Authorized officials only — Nagarain Municipality</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    with st.form("admin_login_form"):
-        pw = st.text_input("Admin Password", type="password")
-        submitted = st.form_submit_button("🔓 Log In", type="primary")
-    if submitted:
-        if pw == get_admin_password():
-            st.session_state.admin_authenticated = True
-            st.rerun()
-        else:
-            st.error("Incorrect password.")
-    st.caption(
-        "Demo credential is set via the ADMIN_PASSWORD secret/environment variable "
-        "(defaults to a placeholder if unset). This gate exists to demonstrate "
-        "role separation between citizens and officials — production deployment "
-        "would use proper per-official accounts."
-    )
-
-
-# --------------------------------------------------------------------------
-# ADMIN PORTAL
-# --------------------------------------------------------------------------
-def render_admin_portal():
-    if not st.session_state.admin_authenticated:
-        render_admin_login()
-        return
-
-    st.markdown(
-        """
-        <div class="main-header">
-            <h1>🏢 Municipal Admin Operations Room</h1>
-            <p>Nagarain Municipality — Multi-Agent Capital Budget Allocation Console</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    top_col1, top_col2 = st.columns([5, 1])
-    with top_col2:
-        if st.button("🔒 Log Out"):
-            st.session_state.admin_authenticated = False
-            st.rerun()
-
-    # --- Live metric dashboard ---
-    m1, m2, m3 = st.columns(3)
-    with m1:
-        st.markdown(
-            f"""<div class="metric-card"><b>💰 Total Revenue Ceiling</b><br>
-            <span style="font-size:26px;">{fmt_npr(total_revenue_ceiling())}</span></div>""",
-            unsafe_allow_html=True,
-        )
-    with m2:
-        st.markdown(
-            f"""<div class="metric-card"><b>🏗️ Allocated Project Expenditure</b><br>
-            <span style="font-size:26px;">{fmt_npr(allocated_expenditure())}</span></div>""",
-            unsafe_allow_html=True,
-        )
-    with m3:
-        st.markdown(
-            f"""<div class="metric-card"><b>🧾 Unallocated / Contingency Reserve</b><br>
-            <span style="font-size:26px;">{fmt_npr(unallocated_reserve())}</span></div>""",
-            unsafe_allow_html=True,
-        )
-
-    st.write("")
-
-    # --- STEP 1 ---
-    with st.expander("⚙️ Step 1: Manage Financial Revenues & Policy Guidelines", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.session_state.federal_grant = st.number_input(
-                "Federal Equalization Grants (NPR)", min_value=0,
-                value=st.session_state.federal_grant, step=100_000,
-            )
-        with c2:
-            st.session_state.provincial_grant = st.number_input(
-                "Provincial Grants (NPR)", min_value=0,
-                value=st.session_state.provincial_grant, step=100_000,
-            )
-        with c3:
-            st.session_state.internal_revenue = st.number_input(
-                "Internal Source Revenue (NPR)", min_value=0,
-                value=st.session_state.internal_revenue, step=100_000,
-            )
-
-        st.info(f"**Total Revenue Ceiling:** {fmt_npr(total_revenue_ceiling())}")
-
-        st.session_state.policy_directive = st.text_area(
-            "Mayor's Policy Directive",
-            value=st.session_state.policy_directive,
-            height=90,
-            help="This text is fed directly into the Context-Aware Allocation Agent's "
-                 "prompt — changing it changes how the agent reasons about funding priority.",
-        )
-        if st.button("💾 Save Revenue & Policy Settings"):
-            save_state()
-            st.success("Saved.")
-
-    # --- MAYOR'S BUDGET BRIEFING (for first-time / new mayors) ---
-    with st.expander("🧭 Mayor's Budget Briefing — Read This If You're New", expanded=False):
-        st.caption(
-            "Every 5 years a new mayor takes office with no prior experience "
-            "building a municipal capital budget. This briefing summarizes, in "
-            "plain language, the two things that should drive allocation "
-            "decisions this cycle — LIVE hazard risk and what citizens are "
-            "actually asking for — before you touch a single number."
-        )
-
-        st.markdown("##### 🗺️ Ward Hazard Profile")
-        hazard_col1, hazard_col2 = st.columns([4, 1])
-        with hazard_col2:
-            if st.button("🔄 Refresh Live Hazard Data"):
-                st.session_state.hazard_cache = {}
-                st.rerun()
-
-        geo_text, hazard_live = ward_profile_summary()
-        if hazard_live:
-            st.markdown(
-                """<span class="status-pill pill-live">🟢 Live Open-Meteo Data</span>""",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                """<span class="status-pill pill-fallback">🟠 Static Fallback (live API unavailable)</span>""",
-                unsafe_allow_html=True,
-            )
-        st.caption(
-            "Terrain/infrastructure descriptions and ward coordinates are "
-            "illustrative demo placeholders — a real deployment would use "
-            "verified municipal GIS/DRR/census data. The precipitation "
-            "numbers above, however, are fetched live from Open-Meteo "
-            "(api.open-meteo.com), a free, keyless weather API."
-        )
-
-        ward_rows = []
-        for ward, p in WARD_PROFILES.items():
-            hz = fetch_ward_hazard(ward)
-            ward_rows.append({
-                "Ward": ward,
-                "Terrain": p["terrain"],
-                "7-Day Precip (mm)": hz["precip_7day_mm"] if hz["source"] == "live" else "n/a",
-                "Peak Rain Prob. (%)": hz["max_precip_probability"] if hz["source"] == "live" else "n/a",
-                "Baseline Flood Risk": p["flood_risk"],
-                "Est. Population": p["population_estimate"],
-                "Infrastructure Notes": p["existing_infra_notes"],
-            })
-        st.dataframe(pd.DataFrame(ward_rows), use_container_width=True, hide_index=True)
-
-        st.markdown("##### 📣 What Citizens Are Asking For This Cycle")
-        demand_text, demand_data = citizen_demand_summary()
-        if demand_data:
-            dcol1, dcol2 = st.columns(2)
-            with dcol1:
-                st.markdown("**By Sector**")
-                sector_df = pd.DataFrame(
-                    [{"Sector": k, "Severity-Weighted Signal": v} for k, v in
-                     sorted(demand_data["by_sector"].items(), key=lambda x: -x[1])]
                 )
-                st.dataframe(sector_df, use_container_width=True, hide_index=True)
-            with dcol2:
-                st.markdown("**By Ward**")
-                ward_demand_df = pd.DataFrame(
-                    [{"Ward": k, "Severity-Weighted Signal": v} for k, v in
-                     sorted(demand_data["by_ward"].items(), key=lambda x: -x[1])]
-                )
-                st.dataframe(ward_demand_df, use_container_width=True, hide_index=True)
-            st.caption(
-                "This is exactly what the Context-Aware Allocation Agent in Step "
-                "4 sees and reasons over alongside the live hazard table above."
-            )
         else:
-            st.caption("No citizen suggestions submitted yet this cycle.")
-
-    # --- STEP 2 ---
-    with st.expander("📄 Step 2: Ingest Memos & Dhyanakarshan Letters", expanded=False):
-        st.caption(
-            "Upload a text/PDF memo, or a PHOTO of a memo/petition/ward-assembly "
-            "minute sheet — photos are read by the Ingestion Agent's vision model "
-            "for real OCR extraction, not a placeholder."
-        )
-        uploaded_memo = st.file_uploader(
-            "Upload a memo (PDF/TXT) or a photo of a paper memo (JPG/PNG)",
-            type=["pdf", "txt", "jpg", "jpeg", "png"], key="memo_uploader",
-        )
-        col_src, col_type = st.columns(2)
-        with col_src:
-            memo_source = st.text_input(
-                "Source Entity (used if OCR is unavailable, or to override it)",
-                placeholder="e.g. Ward 2 Youth Club",
-            )
-        with col_type:
-            memo_type = st.selectbox(
-                "Document Type (used if OCR is unavailable, or to override it)",
-                ["Dhyanakarshan Letter", "Policy Memo", "Petition", "Ward Assembly Minutes"],
-            )
-
-        if st.button("📥 Ingest Uploaded Memo", key="ingest_memo_btn"):
-            if uploaded_memo is not None:
-                is_image = uploaded_memo.type in ("image/jpeg", "image/png", "image/jpg")
-                ocr_result = None
-                if is_image:
-                    with st.spinner("Ingestion Agent is reading the photographed memo..."):
-                        ocr_result = ai_extract_memo_from_image(
-                            uploaded_memo.getvalue(), uploaded_memo.type
-                        )
-
-                if ocr_result is not None:
-                    st.session_state.memos.append({
-                        "source": ocr_result.get("source_entity") or memo_source or "Unspecified Entity",
-                        "doc_type": ocr_result.get("document_type", memo_type),
-                        "demand": ocr_result.get("extracted_demand", ""),
-                    })
-                    save_state()
-                    st.success(
-                        f"🟢 Live AI OCR extracted this memo from "
-                        f"'{uploaded_memo.name}' (detected language: "
-                        f"{ocr_result.get('detected_language', 'n/a')})."
-                    )
-                else:
-                    extracted_demand = (
-                        f"Auto-extracted structural demand from '{uploaded_memo.name}': "
-                        f"requesting municipal review and capital allocation consideration."
-                    )
-                    st.session_state.memos.append({
-                        "source": memo_source or "Unspecified Entity",
-                        "doc_type": memo_type,
-                        "demand": extracted_demand,
-                    })
-                    save_state()
-                    if is_image:
-                        st.warning(
-                            "🟠 Live OCR unavailable (no API key or call failed) — "
-                            "used placeholder extraction instead. Fill in Source "
-                            "Entity/Document Type manually for accuracy."
-                        )
-                    else:
-                        st.success(f"Memo '{uploaded_memo.name}' ingested (placeholder text extraction for PDF/TXT).")
-            else:
-                st.warning("Please attach a file before ingesting.")
-
-        st.markdown("#### Active Memorandums")
-        st.caption(
-            "These memos are passed directly into the Allocation Agent's prompt "
-            "context alongside the citizen complaints."
-        )
-        if not st.session_state.memos:
-            st.caption("No memos ingested yet.")
-        else:
-            for memo in st.session_state.memos:
-                st.markdown(
-                    f"""
-                    <div class="complaint-card">
-                        <b>{memo['source']}</b> &nbsp;
-                        <span class="status-pill pill-standard">{memo['doc_type']}</span>
-                        <br>{memo['demand']}
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-    # --- STEP 3 ---
-    with st.expander("📥 Step 3: Linked Public Suggestions & Manual Override Console", expanded=False):
-        st.markdown("#### 🧪 Synthetic Load Test")
-        st.caption(
-            "Generate additional synthetic complaints to stress-test the allocation "
-            "agent's behavior under real budget scarcity, rather than only the 5 seeded demo cases."
-        )
-        gen_col1, gen_col2 = st.columns([1, 3])
-        with gen_col1:
-            gen_count = st.number_input("How many?", min_value=5, max_value=40, value=15, step=5)
-        with gen_col2:
-            if st.button("🧪 Generate Synthetic Complaints"):
-                for i in range(gen_count):
-                    sector, language, template = random.choice(SYNTHETIC_TEMPLATES)
-                    ward = random.choice(WARDS)
-                    days = random.randint(0, 20)
-                    cid = next_complaint_id()
-                    complaint = seed_complaint(cid, ward, sector, language, template, days)
-                    st.session_state.complaints.append(complaint)
-                save_state()
-                st.success(f"Generated {gen_count} synthetic complaints for load testing.")
-                st.rerun()
-
-        st.markdown("---")
-
-        if not st.session_state.complaints:
-            st.caption("No public suggestions filed yet.")
-        else:
-            for c in st.session_state.complaints:
-                st.markdown(
-                    f"""
-                    <div class="complaint-card">
-                        <b>{c['id']}</b> — {c['sector']} — {c['ward']} ({c['language']}) &nbsp;
-                        <span class="status-pill {'pill-high' if c['priority']=='High Priority' else 'pill-standard'}">{c['priority']} ({c.get('severity_score','n/a')}/10)</span>
-                        &nbsp; <span class="status-pill pill-pending">{c['status']}</span>
-                        <br><i>"{c['text']}"</i>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                oc1, oc2 = st.columns([3, 1])
-                with oc1:
-                    c["admin_response"] = st.text_input(
-                        f"Custom response reason for {c['id']}",
-                        value=c["admin_response"], key=f"response_{c['id']}",
-                    )
-                with oc2:
-                    c["override_include"] = st.selectbox(
-                        f"Force-fund {c['id']}?", ["Yes", "No"],
-                        index=0 if c["override_include"] == "Yes" else 1,
-                        key=f"override_{c['id']}",
-                    )
-                st.markdown("---")
-            if st.button("💾 Save Overrides"):
-                save_state()
-                st.success("Saved.")
-
-    # --- STEP 4 — AGENT 2: CONTEXT-AWARE ALLOCATION AGENT ---
-    with st.expander("🤖 Step 4: Context-Aware Allocation Agent", expanded=True):
-        mode_pill = "pill-live" if AI_LIVE else "pill-fallback"
-        mode_label = "🟢 Live AI Agent (Claude tool-use loop)" if AI_LIVE else "🟠 Fallback Simulation (no API key configured)"
-        st.markdown(f"""<span class="status-pill {mode_pill}">{mode_label}</span>""", unsafe_allow_html=True)
-        st.write("")
-        st.write(
-            "This agent is given the revenue ceiling, the Mayor's policy directive, "
-            "every ward's LIVE hazard profile (fetched from Open-Meteo), the aggregate "
-            "citizen demand signal from this cycle's submissions, every ingested memo, "
-            "and every open complaint. It then decides — turn by turn, via tool calls — "
-            "what to fund, defer, or reject, and why. The app enforces the hard budget "
-            "ceiling; the agent decides everything within it."
-        )
-
-        if st.button("🚀 Compile and Run AI Budget Allocation Engine", type="primary"):
-            with st.spinner("Allocation agent is reasoning over hazard data, budget, policy, and complaints..."):
-                mode_used, trace = run_ai_allocation_engine()
-            st.session_state.conflict_flags = []
-            st.session_state.fairness_assessment = None
-            st.session_state.fairness_source = None
-            save_state()
-            if mode_used == "ai":
-                st.success("✅ Live Context-Aware Allocation Agent completed the run.")
-            else:
-                st.warning("⚠️ Ran in fallback simulation mode (no live AI backend available).")
-
-        if st.session_state.trace_log:
-            st.markdown("#### 🧠 Agent Trace (live tool-call log)")
-            for line in st.session_state.trace_log[-30:]:
-                st.markdown(f"""<div class="trace-card">{line}</div>""", unsafe_allow_html=True)
-
-        if st.session_state.projects:
-            df = pd.DataFrame(
-                [
-                    {
-                        "Project Name": p["project_name"],
-                        "Target Ward": p["ward"],
-                        "Target Sector": p["sector"],
-                        "Allocated Amount (NPR)": p["amount"],
-                        "AI Logic Justification": p["justification"],
-                    }
-                    for p in st.session_state.projects
-                ]
-            )
-            st.markdown("#### 📋 Project-Wise Allocation Breakdown")
-            st.dataframe(df, use_container_width=True)
-        else:
-            st.caption("Run the allocation engine to generate the project breakdown table.")
-
-    # --- STEP 5 — AGENT 3: INDEPENDENT AUDITOR & FAIRNESS AGENT ---
-    with st.expander("🕵️ Step 5: Independent Auditor & Fairness Review", expanded=False):
-        st.write(
-            "This agent runs AFTER allocation. It compares the final decisions — "
-            "including any manual official overrides from Step 3 — against the "
-            "objective citizen demand data, and raises Conflict Flags where a "
-            "high-need ward or sector appears to have been starved to fund a "
-            "lower-priority one."
-        )
-
-        if not st.session_state.projects:
-            st.caption("Run Step 4's allocation engine first.")
-        else:
-            if st.button("🔍 Run Independent Fairness Audit", type="primary"):
-                with st.spinner("Auditor agent is comparing overrides against citizen demand data..."):
-                    result = run_fairness_audit()
-                st.session_state.conflict_flags = result["conflicts"]
-                st.session_state.fairness_assessment = result["overall_assessment"]
-                st.session_state.fairness_source = result["source"]
-                st.session_state.logs.append(
-                    f"[AUDIT] Fairness audit completed ({result['source']}) — "
-                    f"{len(result['conflicts'])} conflict(s) found."
-                )
-                save_state()
-
-            if st.session_state.fairness_assessment:
-                audit_pill = "pill-live" if st.session_state.fairness_source == "ai" else "pill-fallback"
-                audit_label = "🟢 Live AI Auditor" if st.session_state.fairness_source == "ai" else "🟠 Fallback Heuristic Auditor"
-                st.markdown(f"""<span class="status-pill {audit_pill}">{audit_label}</span>""", unsafe_allow_html=True)
-                st.write(f"**Overall Assessment:** {st.session_state.fairness_assessment}")
-
-                if st.session_state.conflict_flags:
-                    st.markdown("#### 🚩 Conflict Flags")
-                    for flag in st.session_state.conflict_flags:
-                        severity_pill = {
-                            "Critical": "pill-critical", "Moderate": "pill-moderate", "Low": "pill-low",
-                        }.get(flag.get("severity", "Low"), "pill-low")
-                        st.markdown(
-                            f"""
-                            <div class="conflict-card">
-                                <span class="status-pill {severity_pill}">{flag.get('severity','Low')}</span>
-                                <b>&nbsp;{flag.get('complaint_id','')} — {flag.get('ward','')} / {flag.get('sector','')}</b>
-                                <br>{flag.get('finding','')}
-                                <br><i>Recommendation: {flag.get('recommendation','')}</i>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
-                else:
-                    st.success("No fairness conflicts detected in the current allocation.")
-
-    # --- STEP 6 — AGENT 4: OUTPUT, EXPORT & NOTIFICATION AGENT ---
-    with st.expander("📤 Step 6: Output, Export & Notification Agent", expanded=False):
-        st.write(
-            "Converts the approved budget into government-ready deliverables and "
-            "drives citizen notifications, logging a full lifecycle from complaint "
-            "ID to allocated Project ID to notification sent."
-        )
-
-        if not st.session_state.projects:
-            st.caption("Run Step 4's allocation engine first to generate exportable data.")
-        else:
-            df = pd.DataFrame(
-                [
-                    {
-                        "Project Name": p["project_name"],
-                        "Target Ward": p["ward"],
-                        "Target Sector": p["sector"],
-                        "Allocated Amount (NPR)": p["amount"],
-                        "AI Logic Justification": p["justification"],
-                        "Linked Complaint ID": p.get("linked_complaint", ""),
-                    }
-                    for p in st.session_state.projects
-                ]
-            )
-
-            if st.session_state.logs:
-                with st.container():
-                    st.markdown("#### 🔔 System Alert & Lifecycle Logs")
-                    for log_line in st.session_state.logs[-20:]:
-                        st.text(log_line)
-
-            # --- Download engine: try Excel, fall back to CSV ---
-            st.markdown("#### 📊 Export Allocation Sheet")
-            try:
-                excel_buffer = io.BytesIO()
-                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-                    df.to_excel(writer, index=False, sheet_name="Budget Allocation")
-                excel_buffer.seek(0)
-                st.download_button(
-                    label="📥 Download Allocation Sheet (.xlsx)",
-                    data=excel_buffer,
-                    file_name="bajet_sunuwai_allocation.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-            except Exception:
-                csv_buffer = io.StringIO()
-                df.to_csv(csv_buffer, index=False)
-                st.warning(
-                    "⚠️ Excel export engine unavailable in this environment — "
-                    "falling back to CSV export so the download always works."
-                )
-                st.download_button(
-                    label="📥 Download Allocation Sheet (.csv)",
-                    data=csv_buffer.getvalue(),
-                    file_name="bajet_sunuwai_allocation.csv",
-                    mime="text/csv",
-                )
-
-            # --- Manual Planning Engineer Modification Layer ---
-            st.markdown("#### 🛠️ Manual Planning Engineer Modification Layer")
-            st.caption(
-                "If a planning engineer edits the downloaded sheet offline, "
-                "upload the revised file to sync it back into the master dashboard."
-            )
-            revised_file = st.file_uploader(
-                "Upload revised allocation sheet (.xlsx or .csv)",
-                type=["xlsx", "csv"], key="revised_upload",
-            )
-            if revised_file is not None:
-                if st.button("🔄 Apply Engineer Revisions to Master Dashboard"):
-                    try:
-                        if revised_file.name.lower().endswith(".xlsx"):
-                            revised_df = pd.read_excel(revised_file, engine="openpyxl")
-                        else:
-                            revised_df = pd.read_csv(revised_file)
-
-                        updated_projects = []
-                        for _, row in revised_df.iterrows():
-                            updated_projects.append({
-                                "project_name": row.get("Project Name", "Unnamed Project"),
-                                "ward": row.get("Target Ward", ""),
-                                "sector": row.get("Target Sector", ""),
-                                "amount": float(row.get("Allocated Amount (NPR)", 0) or 0),
-                                "justification": row.get("AI Logic Justification", ""),
-                                "linked_complaint": row.get("Linked Complaint ID", ""),
-                            })
-                        st.session_state.projects = updated_projects
-                        st.session_state.logs.append(
-                            "[ALERT] Master dashboard synced with planning engineer's "
-                            "manually revised allocation sheet (human-in-the-loop validation)."
-                        )
-                        save_state()
-                        st.success("✅ Master stats dashboard updated from the revised sheet.")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Could not parse the uploaded file: {exc}")
-
-            # --- Finalize, publish, and notify ---
-            st.markdown("#### 📢 Finalize, Publish & Notify")
-            if st.session_state.budget_published:
-                st.success("✅ This budget has already been finalized, published, and citizens notified.")
-            else:
-                if st.button("📢 Finalize and Publish Budget", type="primary"):
-                    st.session_state.budget_published = True
-                    st.session_state.logs.append(
-                        "[ALERT] Budget finalized and published — public notifications unlocked."
-                    )
-                    notified = 0
-                    for c in st.session_state.complaints:
-                        if c["status"] == "Budget Concluded":
-                            project = next(
-                                (p for p in st.session_state.projects if p.get("linked_complaint") == c["id"]),
-                                None,
-                            )
-                            project_id = project["project_name"] if project else "(none — deferred)"
-                            st.session_state.logs.append(
-                                f"[LIFECYCLE] {c['id']} -> Project '{project_id}' -> "
-                                f"notification available on citizen's Live Transparency Matrix."
-                            )
-                            notified += 1
-                    save_state()
-                    st.balloons()
-                    st.success(
-                        f"🎉 Budget finalized and published! {notified} citizen(s) can now "
-                        f"see their outcome in the Public Citizen Portal, and can forward "
-                        f"unsuccessful complaints to Hello Sarkar via WhatsApp."
-                    )
-
-
-# --------------------------------------------------------------------------
-# MAIN
-# --------------------------------------------------------------------------
-def main():
-    inject_css()
-    init_session_state()
-
-    st.sidebar.markdown("## 🏛️ Bajet Sunuwai")
-    st.sidebar.markdown("**बजेट सुनुवाई**")
-    st.sidebar.caption("Multi-agent AI civic-budget platform — Nagarain Municipality")
-    st.sidebar.markdown("---")
-
-    ai_pill = "🟢 Live AI Backend" if AI_LIVE else "🟠 Fallback Simulation Mode"
-    st.sidebar.markdown(f"**AI Status:** {ai_pill}")
-    if not AI_LIVE:
-        st.sidebar.caption(
-            "Set ANTHROPIC_API_KEY (env var or .streamlit/secrets.toml) to enable "
-            "the live Ingestion, Allocation, and Auditor agents."
-        )
-    st.sidebar.caption(
-        "Hazard data: Open-Meteo (free, keyless) — always live regardless of "
-        "the Anthropic API status above."
-    )
-
-    portal = st.sidebar.radio(
-        "Select Portal",
-        ["👤 Public Citizen Portal", "🏢 Municipal Admin Operations Room"],
-    )
-
-    st.sidebar.markdown("---")
-    st.sidebar.markdown(
-        f"**Budget Status:** "
-        f"{'🟢 Published' if st.session_state.budget_published else '🟡 Under Review'}"
-    )
-    st.sidebar.markdown(f"**Total Complaints Filed:** {len(st.session_state.complaints)}")
-    st.sidebar.markdown(
-        '<p class="footer-note">Built for the Yantra X Softbots Agentic AI Hackathon.</p>',
-        unsafe_allow_html=True,
-    )
-
-    if portal == "👤 Public Citizen Portal":
-        render_public_portal()
+            log.append(("PASS", "Check 1 (Ward Bias): No ward exceeds the 30% concentration threshold."))
     else:
-        render_admin_portal()
+        log.append(("PASS", "Check 1 (Ward Bias): No project line items to evaluate."))
+
+    # CHECK 2 — Sectoral starvation
+    if not projects_df.empty:
+        sector_totals = projects_df.groupby("Sector")["Allocated Amount (NPR)"].sum()
+        starved = [s for s in SECTORS if sector_totals.get(s, 0) <= 0]
+        if starved:
+            log.append(
+                (
+                    "FLAGGED",
+                    f"Check 2 (Sectoral Starvation): Sector(s) {', '.join(starved)} "
+                    "received zero allocation.",
+                )
+            )
+        else:
+            log.append(("PASS", "Check 2 (Sectoral Starvation): All 5 statutory sectors received funding."))
+    else:
+        log.append(("FLAGGED", "Check 2 (Sectoral Starvation): No allocations generated at all."))
+
+    # CHECK 3 — Funding mismatch
+    if critical_warning:
+        log.append(("FLAGGED", f"Check 3 (Funding Mismatch): {critical_warning}"))
+    else:
+        ringfenced_total = projects_df[projects_df["Origin"] == "Ring-Fenced Mandate"][
+            "Allocated Amount (NPR)"
+        ].sum() if not projects_df.empty else 0
+        if ringfenced_total > 0.5 * budget_ceiling:
+            log.append(
+                (
+                    "FLAGGED",
+                    f"Check 3 (Funding Mismatch): Ring-fenced mandates total NPR "
+                    f"{ringfenced_total:,.2f}, exceeding 50% of the Total Budget "
+                    "Ceiling — fiscal infeasibility risk.",
+                )
+            )
+        else:
+            log.append(("PASS", "Check 3 (Funding Mismatch): Ring-fenced mandate cost is within safe fiscal bounds."))
+
+    # CHECK 4 — Mandate integrity
+    triggers_fired = []
+    if population > 40_000 and hospital_access == "No Secondary Hospital":
+        triggers_fired.append("Secondary Hospital Construction (Statutory Mandate)")
+    if population > 25_000 and school_access == "No Secondary/High School":
+        triggers_fired.append("Secondary/High School Construction (Statutory Mandate)")
+
+    if triggers_fired:
+        present_names = set(projects_df["Project Name"]) if not projects_df.empty else set()
+        missing = [t for t in triggers_fired if t not in present_names]
+        if missing:
+            log.append(
+                (
+                    "FLAGGED",
+                    "Check 4 (Mandate Integrity): CRITICAL — trigger(s) fired "
+                    f"but no corresponding line item found: {', '.join(missing)}.",
+                )
+            )
+        else:
+            log.append(("PASS", "Check 4 (Mandate Integrity): All fired demographic triggers have matching ring-fenced line items."))
+    else:
+        log.append(("PASS", "Check 4 (Mandate Integrity): No demographic triggers fired this cycle."))
+
+    return log
+
+
+# ---------------------------------------------------------------------------
+# Excel Export Engine
+# ---------------------------------------------------------------------------
+
+
+def generate_excel_report(
+    municipality_name: str,
+    fiscal_year: str,
+    budget_ceiling: float,
+    projects: list,
+    sector_allocations: dict,
+    audit_log: list,
+    population: int,
+    hospital_access: str,
+    school_access: str,
+) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Integrated Budget"
+
+    navy_fill = PatternFill(start_color=NAVY, end_color=NAVY, fill_type="solid")
+    grey_fill = PatternFill(start_color=LIGHT_GREY, end_color=LIGHT_GREY, fill_type="solid")
+    gold_fill = PatternFill(start_color=ACCENT_GOLD, end_color=ACCENT_GOLD, fill_type="solid")
+    white_bold = Font(color="FFFFFF", bold=True, size=12)
+    white_bold_small = Font(color="FFFFFF", bold=True, size=10)
+    title_font = Font(color=NAVY, bold=True, size=16)
+    subtitle_font = Font(color="404040", italic=True, size=10)
+    thin_side = Side(style="thin", color="B0B0B0")
+    thin_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+    currency_fmt = '#,##0.00 "NPR"'
+
+    headers = ["Project Name", "Sector", "Ward", "Origin", "Urgency", "Allocated Amount (NPR)"]
+    n_cols = len(headers)
+
+    # ---- Title block ----
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=n_cols)
+    title_cell = ws.cell(row=1, column=1, value=f"{municipality_name} — Integrated Program & Budget (FY {fiscal_year})")
+    title_cell.font = title_font
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 26
+
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=n_cols)
+    generated = ws.cell(
+        row=2,
+        column=1,
+        value=(
+            f"Generated by Bajet Sunuwai Agentic Engine | "
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M')} | "
+            f"Total Budget Ceiling: NPR {budget_ceiling:,.2f}"
+        ),
+    )
+    generated.font = subtitle_font
+    generated.alignment = Alignment(horizontal="center")
+
+    context_lines = [
+        f"Population Input: {population:,}",
+        f"Hospital Access Status: {hospital_access}",
+        f"School Access Status: {school_access}",
+    ]
+    if population > 40_000 and hospital_access == "No Secondary Hospital":
+        context_lines.append("Demographic Trigger: Mandatory Hospital Construction Enforced")
+    if population > 25_000 and school_access == "No Secondary/High School":
+        context_lines.append("Demographic Trigger: Mandatory School Construction Enforced")
+
+    row_cursor = 3
+    for line in context_lines:
+        ws.merge_cells(start_row=row_cursor, start_column=1, end_row=row_cursor, end_column=n_cols)
+        c = ws.cell(row=row_cursor, column=1, value=f"• {line}")
+        c.font = Font(color=NAVY, bold=True, size=10)
+        c.alignment = Alignment(horizontal="left")
+        c.fill = grey_fill
+        row_cursor += 1
+
+    row_cursor += 1  # spacer
+
+    # ---- Sector summary block ----
+    ws.merge_cells(start_row=row_cursor, start_column=1, end_row=row_cursor, end_column=n_cols)
+    sec_title = ws.cell(row=row_cursor, column=1, value="Sector-Wise Ceiling Distribution")
+    sec_title.font = white_bold_small
+    sec_title.fill = gold_fill
+    sec_title.alignment = Alignment(horizontal="left", vertical="center")
+    row_cursor += 1
+
+    for sector, amount in sector_allocations.items():
+        ws.cell(row=row_cursor, column=1, value=sector).border = thin_border
+        amt_cell = ws.cell(row=row_cursor, column=2, value=round(amount, 2))
+        amt_cell.number_format = currency_fmt
+        amt_cell.border = thin_border
+        for col in range(3, n_cols + 1):
+            ws.cell(row=row_cursor, column=col).border = thin_border
+        row_cursor += 1
+
+    row_cursor += 1  # spacer
+
+    # ---- Project table header ----
+    header_row = row_cursor
+    for col_idx, h in enumerate(headers, start=1):
+        cell = ws.cell(row=header_row, column=col_idx, value=h)
+        cell.fill = navy_fill
+        cell.font = white_bold
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = thin_border
+    ws.row_dimensions[header_row].height = 24
+
+    # ---- Project rows ----
+    data_start = header_row + 1
+    r = data_start
+    for p in projects:
+        ws.cell(row=r, column=1, value=p.get("Project Name", "")).border = thin_border
+        ws.cell(row=r, column=2, value=p.get("Sector", "")).border = thin_border
+        ws.cell(row=r, column=3, value=str(p.get("Ward", ""))).border = thin_border
+        origin_cell = ws.cell(row=r, column=4, value=p.get("Origin", ""))
+        origin_cell.border = thin_border
+        if p.get("Origin") == "Ring-Fenced Mandate":
+            origin_cell.font = Font(color="B7791F", bold=True)
+        ws.cell(row=r, column=5, value=p.get("Urgency", "")).border = thin_border
+        amt_cell = ws.cell(row=r, column=6, value=p.get("Allocated Amount (NPR)", 0))
+        amt_cell.number_format = currency_fmt
+        amt_cell.border = thin_border
+        if r % 2 == 0:
+            for col in range(1, n_cols + 1):
+                ws.cell(row=r, column=col).fill = grey_fill
+        r += 1
+    data_end = r - 1
+
+    # ---- SUM formula row ----
+    sum_row = r
+    ws.merge_cells(start_row=sum_row, start_column=1, end_row=sum_row, end_column=5)
+    total_label = ws.cell(row=sum_row, column=1, value="TOTAL ALLOCATED BUDGET")
+    total_label.font = white_bold
+    total_label.fill = navy_fill
+    total_label.alignment = Alignment(horizontal="right", vertical="center")
+    for col in range(1, 6):
+        ws.cell(row=sum_row, column=col).fill = navy_fill
+        ws.cell(row=sum_row, column=col).border = thin_border
+
+    total_col_letter = get_column_letter(6)
+    total_cell = ws.cell(
+        row=sum_row,
+        column=6,
+        value=f"=SUM({total_col_letter}{data_start}:{total_col_letter}{data_end})" if data_end >= data_start else 0,
+    )
+    total_cell.number_format = currency_fmt
+    total_cell.font = white_bold
+    total_cell.fill = navy_fill
+    total_cell.border = thin_border
+    ws.row_dimensions[sum_row].height = 22
+
+    remainder_row = sum_row + 1
+    ws.merge_cells(start_row=remainder_row, start_column=1, end_row=remainder_row, end_column=5)
+    rem_label = ws.cell(row=remainder_row, column=1, value="TOTAL BUDGET CEILING (NPR)")
+    rem_label.font = Font(bold=True, color=NAVY)
+    rem_label.alignment = Alignment(horizontal="right")
+    ceiling_cell = ws.cell(row=remainder_row, column=6, value=budget_ceiling)
+    ceiling_cell.number_format = currency_fmt
+    ceiling_cell.font = Font(bold=True, color=NAVY)
+
+    # ---- Audit trail sheet ----
+    audit_ws = wb.create_sheet("Independent Audit Log")
+    audit_ws.merge_cells("A1:C1")
+    audit_title = audit_ws.cell(row=1, column=1, value=f"Independent Auditor Agent — Verification Log ({municipality_name}, FY {fiscal_year})")
+    audit_title.font = title_font
+    audit_headers = ["Status", "Finding", "Timestamp"]
+    for col_idx, h in enumerate(audit_headers, start=1):
+        c = audit_ws.cell(row=3, column=col_idx, value=h)
+        c.fill = navy_fill
+        c.font = white_bold
+        c.border = thin_border
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    for i, (status, msg) in enumerate(audit_log, start=4):
+        status_cell = audit_ws.cell(row=i, column=1, value=status)
+        status_cell.font = Font(
+            bold=True, color=("C0392B" if status == "FLAGGED" else "1E8449")
+        )
+        status_cell.border = thin_border
+        msg_cell = audit_ws.cell(row=i, column=2, value=msg)
+        msg_cell.alignment = Alignment(wrap_text=True, vertical="top")
+        msg_cell.border = thin_border
+        audit_ws.cell(row=i, column=3, value=ts).border = thin_border
+    audit_ws.column_dimensions["A"].width = 12
+    audit_ws.column_dimensions["B"].width = 90
+    audit_ws.column_dimensions["C"].width = 18
+
+    # ---- Column widths (main sheet) ----
+    ws.column_dimensions["A"].width = 55
+    ws.column_dimensions["B"].width = 22
+    ws.column_dimensions["C"].width = 16
+    ws.column_dimensions["D"].width = 20
+    ws.column_dimensions["E"].width = 12
+    ws.column_dimensions["F"].width = 24
+    ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Streamlit UI
+# ---------------------------------------------------------------------------
+
+
+def main():
+    st.set_page_config(
+        page_title="Bajet Sunuwai — Agentic Budget Formulation",
+        page_icon="🏛️",
+        layout="wide",
+    )
+
+    st.title("🏛️ बजेट सुनुवाई — Bajet Sunuwai")
+    st.caption(
+        "Agentic Twin-Engine platform bridging Tole Bhela grassroots inputs "
+        "(Engine A) with statutory demographic mandates (Engine B) into an "
+        "Integrated Program & Budget, per the Local Government Operation "
+        "Act, 2074."
+    )
+
+    # ---- Sidebar: Global Parameters ----
+    with st.sidebar:
+        st.header("⚙️ Global Parameters")
+        municipality_name = st.text_input("Municipality Name", value="Nagarain Municipality")
+        fiscal_year = st.selectbox("Fiscal Year", FISCAL_YEARS, index=0)
+        budget_ceiling = st.number_input(
+            "Total Budget Ceiling (NPR)",
+            min_value=1_000_000.0,
+            max_value=10_000_000_000.0,
+            value=250_000_000.0,
+            step=1_000_000.0,
+            format="%.2f",
+        )
+
+        st.divider()
+        st.header("🧭 Demographic Parameters (Engine B — 'Thatha')")
+        st.caption("Adjust these to test the Top-Down mandate-injection trigger.")
+        population = st.slider("Municipal Population", min_value=5_000, max_value=150_000, value=45_000, step=1_000)
+        hospital_access = st.selectbox(
+            "Hospital Access Status",
+            ["Has Secondary Hospital", "No Secondary Hospital"],
+            index=1,
+        )
+        school_access = st.selectbox(
+            "Secondary/High School Access Status",
+            ["Has Secondary/High School", "No Secondary/High School"],
+            index=0,
+        )
+
+        st.divider()
+        with st.expander("📜 View Agent System Prompts"):
+            st.markdown("**🤖 Ingestion & Translation Agent**")
+            st.code(INGESTION_TRANSLATION_AGENT_PROMPT, language="text")
+            st.markdown("**🤖 Contextual Allocator Agent**")
+            st.code(CONTEXTUAL_ALLOCATOR_AGENT_PROMPT, language="text")
+            st.markdown("**🤖 Independent Auditor Agent**")
+            st.code(INDEPENDENT_AUDITOR_AGENT_PROMPT, language="text")
+
+    # ---- Trigger status banner ----
+    trigger_msgs = []
+    if population > 40_000 and hospital_access == "No Secondary Hospital":
+        trigger_msgs.append("🏥 Hospital construction mandate ARMED (population > 40,000, no secondary hospital).")
+    if population > 25_000 and school_access == "No Secondary/High School":
+        trigger_msgs.append("🏫 School construction mandate ARMED (population > 25,000, no secondary/high school).")
+    if trigger_msgs:
+        st.warning("  \n".join(trigger_msgs))
+    else:
+        st.success("No demographic mandate triggers currently armed. Adjust parameters in the sidebar to test Engine B.")
+
+    st.subheader("📝 Step 3 → Step 4: Unstructured Citizen Requests (Tole Bhela Inputs)")
+    st.caption(
+        "Simulates raw, multi-dialect complaints collected at settlement-level ward "
+        "assemblies. Edit, add, or delete rows to test Engine A's ingestion pipeline."
+    )
+
+    if "complaints_df" not in st.session_state:
+        st.session_state.complaints_df = pd.DataFrame(DEMO_COMPLAINTS)
+
+    edited_df = st.data_editor(
+        st.session_state.complaints_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "Ward": st.column_config.NumberColumn("Ward", min_value=1, max_value=20, step=1),
+            "Sector": st.column_config.SelectboxColumn("Sector", options=SECTORS),
+            "Complaint (raw, multi-dialect)": st.column_config.TextColumn(
+                "Complaint (raw, multi-dialect)", width="large"
+            ),
+            "Urgency (1-5)": st.column_config.SliderColumn(
+                "Baseline Urgency", min_value=1, max_value=5, step=1
+            ),
+        },
+        key="complaints_editor",
+    )
+    st.session_state.complaints_df = edited_df
+
+    run = st.button("🚀 Run Agentic Pipeline", type="primary", use_container_width=True)
+
+    if run:
+        if edited_df.empty:
+            st.error("Add at least one citizen complaint row before running the pipeline.")
+            return
+
+        with st.spinner("Engine A: Ingestion & Translation Agent processing multi-dialect inputs..."):
+            ingested_df = simulate_ingestion_agent(edited_df)
+
+        st.subheader("🤖 Engine A Output — Ingestion & Translation Agent")
+        st.dataframe(
+            ingested_df[
+                [
+                    "Ward",
+                    "Sector",
+                    "Normalized Log Entry",
+                    "Final Urgency",
+                    "Needs Human Review",
+                    "Duplicate Of (row idx)",
+                ]
+            ],
+            use_container_width=True,
+        )
+
+        with st.spinner("Engine B + Contextual Allocator: ring-fencing mandates and distributing budget..."):
+            (
+                projects,
+                sector_allocations,
+                ringfenced_total,
+                remaining_budget,
+                critical_warning,
+            ) = run_contextual_allocator(
+                ingested_df, population, hospital_access, school_access, budget_ceiling
+            )
+
+        if critical_warning:
+            st.error(critical_warning)
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Budget Ceiling", f"NPR {budget_ceiling:,.0f}")
+        col2.metric("Ring-Fenced (Mandates)", f"NPR {ringfenced_total:,.0f}")
+        col3.metric("Remaining (Citizen-Driven)", f"NPR {remaining_budget:,.0f}")
+
+        st.subheader("🤖 Engine B — Contextual Allocator Agent: Integrated Project List")
+        projects_df = pd.DataFrame(projects)
+        st.dataframe(projects_df, use_container_width=True)
+
+        st.subheader("📊 Sector-Wise Ceiling Distribution")
+        sector_df = pd.DataFrame(
+            {"Sector": list(sector_allocations.keys()), "Allocated (NPR)": list(sector_allocations.values())}
+        )
+        st.bar_chart(sector_df.set_index("Sector"))
+
+        with st.spinner("Independent Auditor Agent verifying allocations..."):
+            audit_log = run_independent_auditor(
+                projects, budget_ceiling, population, hospital_access, school_access, critical_warning
+            )
+
+        st.subheader("🤖 Independent Auditor Agent — Verification Log")
+        for status, msg in audit_log:
+            if status == "PASS":
+                st.success(f"✅ {msg}")
+            else:
+                st.error(f"🚩 {msg}")
+
+        excel_bytes = generate_excel_report(
+            municipality_name,
+            fiscal_year,
+            budget_ceiling,
+            projects,
+            sector_allocations,
+            audit_log,
+            population,
+            hospital_access,
+            school_access,
+        )
+
+        st.subheader("📥 Export Integrated Program & Budget")
+        st.download_button(
+            label="Download Presentation-Ready Excel Report (.xlsx)",
+            data=excel_bytes,
+            file_name=f"{municipality_name.replace(' ', '_')}_Budget_FY{fiscal_year.replace('/', '_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+        st.session_state["last_projects"] = projects
+        st.session_state["last_audit_log"] = audit_log
 
 
 if __name__ == "__main__":
