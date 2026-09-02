@@ -808,8 +808,8 @@ def main():
             "Complaint (raw, multi-dialect)": st.column_config.TextColumn(
                 "Complaint (raw, multi-dialect)", width="large"
             ),
-            "Urgency (1-5)": st.column_config.SliderColumn(
-                "Baseline Urgency", min_value=1, max_value=5, step=1
+            "Urgency (1-5)": st.column_config.NumberColumn(
+                "Baseline Urgency", min_value=1, max_value=5, step=1, help="1 = routine, 5 = emergency"
             ),
         },
         key="complaints_editor",
