@@ -603,7 +603,7 @@ def default_state():
         "conflict_flags": [],
         "fairness_assessment": None,
         "fairness_source": None,
-        # --- Thatha Matrix: structural reality metrics ---
+        # --- Tathya Matrix: structural reality metrics ---
         "total_population": 34_000,
         "total_wards_count": 5,
         "hospital_access": "No",
@@ -686,20 +686,28 @@ def fmt_npr(amount):
 
 
 # --------------------------------------------------------------------------
-# THATHA MATRIX — structural reality metrics
+# TATHYA MATRIX — structural reality metrics
 # --------------------------------------------------------------------------
 def mandatory_strategic_flags():
     """
-    Deterministic statutory triggers derived from the Thatha Matrix. These
+    Deterministic statutory triggers derived from the Tathya Matrix. These
     are handed to the Strategic Pass agent as MANDATORY projects it must
     fund, and enforced by a safety net even if the live agent misses one —
     so the rule always visibly fires in a demo, live API or not.
+
+    Each flag carries a stable `trigger_key` — the agent is asked to echo
+    this exact key back via the fulfills_trigger_key tool parameter when it
+    funds the matching project, so the safety net can check for an EXACT
+    key match instead of fuzzy-matching truncated project name strings
+    (which breaks the moment the model names the project something the
+    demo author didn't anticipate verbatim).
     """
     flags = []
     pop = st.session_state.total_population
 
     if st.session_state.hospital_access == "No" and pop > 30_000:
         flags.append({
+            "trigger_key": "hospital_construction",
             "project_name": "Baseline Phase-1 Municipal Hospital Construction",
             "category": "Statutory Mandate",
             "trigger": f"Hospital Access = No and Population ({pop:,}) > 30,000",
@@ -708,6 +716,7 @@ def mandatory_strategic_flags():
 
     if st.session_state.higher_secondary_access == "No" and pop > 30_000:
         flags.append({
+            "trigger_key": "higher_secondary_school",
             "project_name": "Baseline Higher Secondary School Establishment",
             "category": "Statutory Mandate",
             "trigger": f"Higher Secondary School Access = No and Population ({pop:,}) > 30,000",
@@ -874,7 +883,7 @@ def ai_extract_memo_from_image(image_bytes, media_type):
 # AGENT 2 — CONTEXT-AWARE ALLOCATION AGENT
 # Two-Pass architecture:
 #   Pass 1 (Strategic)  — funds macro/statutory projects from the 60% Core
-#                          Strategic Fund, driven by the Thatha Matrix.
+#                          Strategic Fund, driven by the Tathya Matrix.
 #   Pass 2 (Tactical)   — funds ward complaints from the 40% Citizen
 #                          Redressal Fund, driven by hazard + demand data.
 # The two pools are independent — the Tactical Pass never sees Strategic
@@ -902,8 +911,15 @@ STRATEGIC_TOOLS = [
                 },
                 "justification": {
                     "type": "string",
-                    "description": "Why this project was funded — reference the Thatha Matrix "
+                    "description": "Why this project was funded — reference the Tathya Matrix "
                                     "structural facts and/or the Mayor's policy directive.",
+                },
+                "fulfills_trigger_key": {
+                    "type": "string",
+                    "description": "If this project fulfills one of the MANDATORY trigger_key "
+                                    "values listed in the prompt, put that EXACT key here "
+                                    "verbatim (e.g. 'hospital_construction'). Leave empty if this "
+                                    "project is discretionary master-planning, not a mandatory trigger.",
                 },
             },
             "required": ["project_name", "amount", "category", "justification"],
@@ -924,7 +940,7 @@ STRATEGIC_TOOLS = [
 
 def run_strategic_pass():
     """
-    Pass 1. Controls ONLY the 60% Core Strategic Fund. Evaluates the Thatha
+    Pass 1. Controls ONLY the 60% Core Strategic Fund. Evaluates the Tathya
     Matrix first — any statutory trigger (e.g. no hospital access with
     population > 30,000) MUST be funded before anything else. Returns
     (source, projects, trace_lines, log_lines).
@@ -941,8 +957,10 @@ def run_strategic_pass():
     logs = []
 
     mandatory_text = "\n".join(
-        f"- MANDATORY: \"{f['project_name']}\" (Category: {f['category']}) — "
-        f"trigger: {f['trigger']}"
+        f"- MANDATORY [trigger_key=\"{f['trigger_key']}\"]: \"{f['project_name']}\" "
+        f"(Category: {f['category']}) — trigger: {f['trigger']}. When you fund this "
+        f"via fund_strategic_project, set fulfills_trigger_key to exactly "
+        f"\"{f['trigger_key']}\"."
         for f in mandatory
     ) or "(no statutory triggers active this cycle)"
 
@@ -954,7 +972,7 @@ def run_strategic_pass():
         "ONLY the 60% Core Strategic Fund — reserved for master planning, "
         "large infrastructure (hospitals, school buildings), and mandatory "
         "statutory allocations. You do NOT see or touch individual citizen "
-        "complaints; that is Pass 2's job. You are given a 'Thatha Matrix' "
+        "complaints; that is Pass 2's job. You are given a 'Tathya Matrix' "
         "of structural facts about the municipality.\n\n"
         "Any project listed as MANDATORY below MUST be funded via "
         "fund_strategic_project before anything else, using your own "
@@ -970,7 +988,7 @@ def run_strategic_pass():
         f"Core Strategic Fund available (60% of Total Revenue Ceiling): "
         f"{fmt_npr(budget['amount'])}\n\n"
         f"Mayor's Policy Directive:\n{st.session_state.policy_directive}\n\n"
-        f"Thatha Matrix (structural reality of the municipality):\n"
+        f"Tathya Matrix (structural reality of the municipality):\n"
         f"- Total Population: {st.session_state.total_population:,}\n"
         f"- Total Wards: {st.session_state.total_wards_count}\n"
         f"- Hospital Access: {st.session_state.hospital_access}\n"
@@ -1027,6 +1045,7 @@ def run_strategic_pass():
                     else:
                         budget["amount"] -= amount
                         project_name = args.get("project_name", "Untitled Strategic Project")
+                        fulfills_key = (args.get("fulfills_trigger_key") or "").strip()
                         projects.append({
                             "project_name": project_name,
                             "ward": "Municipality-wide",
@@ -1035,6 +1054,7 @@ def run_strategic_pass():
                             "justification": args.get("justification", ""),
                             "linked_complaint": "",
                             "pool": "Strategic",
+                            "fulfills_trigger_key": fulfills_key,
                         })
                         logs.append(f"[ALERT] Strategic project '{project_name}' funded ({fmt_npr(amount)})")
                         trace.append(f"✅ [STRATEGIC] fund_strategic_project → {project_name} — {fmt_npr(amount)}")
@@ -1056,10 +1076,17 @@ def run_strategic_pass():
                 break
 
         # Safety net: guarantee every mandatory statutory project exists,
-        # even if the live agent skipped or renamed it.
-        funded_names_lower = [p["project_name"].lower() for p in projects]
+        # even if the live agent skipped it. Matches on the EXACT
+        # trigger_key the agent was asked to echo back — not a fuzzy
+        # substring of the project name, which breaks the moment the model
+        # names the project something the demo author didn't predict
+        # verbatim (e.g. "Phase-1 Construction of Nagarain Municipal
+        # Hospital" vs. the flag's own "Baseline Phase-1 Municipal...").
+        fulfilled_keys = {
+            p.get("fulfills_trigger_key", "") for p in projects if p.get("fulfills_trigger_key")
+        }
         for flag in mandatory:
-            if not any(flag["project_name"].lower()[:20] in name for name in funded_names_lower):
+            if flag["trigger_key"] not in fulfilled_keys:
                 fallback_amt = min(flag["fallback_amount"], budget["amount"])
                 if fallback_amt > 0:
                     budget["amount"] -= fallback_amt
@@ -1071,9 +1098,10 @@ def run_strategic_pass():
                         "justification": f"Safety-net enforcement of statutory trigger: {flag['trigger']}.",
                         "linked_complaint": "",
                         "pool": "Strategic",
+                        "fulfills_trigger_key": flag["trigger_key"],
                     })
                     logs.append(f"[ALERT] Strategic project '{flag['project_name']}' funded via safety net ({fmt_npr(fallback_amt)})")
-                    trace.append(f"⚠️ [STRATEGIC] safety-net fund_strategic_project → {flag['project_name']} (agent missed mandatory trigger)")
+                    trace.append(f"⚠️ [STRATEGIC] safety-net fund_strategic_project → {flag['project_name']} (agent missed mandatory trigger_key='{flag['trigger_key']}')")
 
         return "ai", projects, trace, logs
 
@@ -1103,6 +1131,7 @@ def run_fallback_strategic_pass(mandatory, note=None):
             "justification": f"[Fallback] Statutory trigger enforced: {flag['trigger']}.",
             "linked_complaint": "",
             "pool": "Strategic",
+            "fulfills_trigger_key": flag["trigger_key"],
         })
         logs.append(f"[ALERT] Strategic project '{flag['project_name']}' funded ({fmt_npr(amt)}) [fallback]")
         trace.append(f"✅ [fallback-STRATEGIC] fund {flag['project_name']} — {fmt_npr(amt)}")
@@ -1897,6 +1926,12 @@ def render_admin_portal():
             st.session_state.admin_authenticated = False
             st.rerun()
 
+    # Show a flash message left over from a previous rerun (e.g. after
+    # applying engineer revisions), then clear it so it doesn't repeat.
+    if st.session_state.get("flash_success"):
+        st.success(st.session_state.flash_success)
+        st.session_state.flash_success = None
+
     # --- Live metric dashboard ---
     m1, m2, m3 = st.columns(3)
     with m1:
@@ -1973,7 +2008,7 @@ def render_admin_portal():
                  "changing it changes how the agents reason about funding priority.",
         )
 
-        st.markdown("##### 🧮 Thatha Matrix — Structural Reality Metrics")
+        st.markdown("##### 🧮 Tathya Matrix — Structural Reality Metrics")
         st.caption(
             "These switches represent the municipality's structural reality. The "
             "Strategic Pass agent evaluates them FIRST — e.g. if Hospital Access "
@@ -2011,7 +2046,7 @@ def render_admin_portal():
                 "; ".join(f["project_name"] for f in active_flags)
             )
         else:
-            st.caption("No statutory triggers active with current Thatha Matrix values.")
+            st.caption("No statutory triggers active with current Tathya Matrix values.")
 
         if st.button("💾 Save Revenue & Policy Settings"):
             save_state()
@@ -2200,7 +2235,10 @@ def render_admin_portal():
                     st.session_state.complaints.append(complaint)
                 save_state()
                 st.success(f"Generated {gen_count} synthetic complaints for load testing.")
-                st.rerun()
+                # No explicit st.rerun() here — Streamlit already reruns
+                # naturally after a button click, and calling st.rerun()
+                # immediately after st.success() would cut the success
+                # banner off before it ever renders to the browser.
 
         st.markdown("---")
 
@@ -2243,7 +2281,7 @@ def render_admin_portal():
         st.markdown(f"""<span class="status-pill {mode_pill}">{mode_label}</span>""", unsafe_allow_html=True)
         st.write("")
         st.write(
-            "**Pass 1 (Strategic):** evaluates the Thatha Matrix and the Mayor's "
+            "**Pass 1 (Strategic):** evaluates the Tathya Matrix and the Mayor's "
             "policy directive first, funding mandatory statutory projects and "
             "master-planning priorities from the 60% Core Strategic Fund.\n\n"
             "**Pass 2 (Tactical):** takes the remaining 40% Citizen Redressal Fund "
@@ -2253,7 +2291,7 @@ def render_admin_portal():
         )
 
         if st.button("🚀 Compile and Run Two-Pass AI Budget Allocation Engine", type="primary"):
-            with st.spinner("Pass 1 (Strategic) reasoning over the Thatha Matrix and policy directive..."):
+            with st.spinner("Pass 1 (Strategic) reasoning over the Tathya Matrix and policy directive..."):
                 run_summary = run_two_pass_allocation_engine()
             st.session_state.conflict_flags = []
             st.session_state.fairness_assessment = None
@@ -2449,7 +2487,15 @@ def render_admin_portal():
                             "manually revised allocation sheet (human-in-the-loop validation)."
                         )
                         save_state()
-                        st.success("✅ Master stats dashboard updated from the revised sheet.")
+                        st.session_state.flash_success = "✅ Master stats dashboard updated from the revised sheet."
+                        # Still rerun here (unlike the Step 3 case) because
+                        # the Step 4 allocation table and fund totals above
+                        # were already rendered earlier in this same
+                        # top-to-bottom script pass, using the OLD projects
+                        # list — without a rerun they'd stay stale. The
+                        # flash_success pattern shows the message on the
+                        # NEXT render instead of right before a rerun, so it
+                        # survives to be seen.
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Could not parse the uploaded file: {exc}")
