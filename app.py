@@ -409,7 +409,34 @@ def get_client():
         return None
 
 
-AI_LIVE = get_client() is not None
+def verify_ai_live(force=False):
+    """
+    Checks whether the AI backend is not just CONFIGURED but actually
+    AUTHENTICATED — get_client() only proves a non-empty key string was
+    supplied, not that it's valid. This makes one cheap real API call
+    (models.list) to confirm the key actually authenticates, and caches
+    the result in session_state so it only runs once per session instead
+    of on every Streamlit rerun (which would burn an API call per click).
+    Returns (is_live: bool, error_message: str | None).
+    """
+    if not force and "ai_live_verified" in st.session_state:
+        return st.session_state.ai_live_verified, st.session_state.get("ai_live_error")
+
+    client = get_client()
+    if client is None:
+        st.session_state.ai_live_verified = False
+        st.session_state.ai_live_error = "No API key configured."
+        return False, st.session_state.ai_live_error
+
+    try:
+        client.models.list(limit=1)
+        st.session_state.ai_live_verified = True
+        st.session_state.ai_live_error = None
+        return True, None
+    except Exception as exc:
+        st.session_state.ai_live_verified = False
+        st.session_state.ai_live_error = str(exc)
+        return False, str(exc)
 
 
 def create_with_retry(client, retries=1, backoff_seconds=1.5, **kwargs):
@@ -2302,9 +2329,12 @@ def render_admin_portal():
 
     # --- STEP 4 — AGENT 2: CONTEXT-AWARE ALLOCATION AGENT ---
     with st.expander("🤖 Step 4: Context-Aware Allocation Agent (Two-Pass)", expanded=True):
-        mode_pill = "pill-live" if AI_LIVE else "pill-fallback"
-        mode_label = "🟢 Live AI Agents (Claude tool-use loops)" if AI_LIVE else "🟠 Fallback Simulation (no API key configured)"
+        ai_live, ai_error = verify_ai_live()
+        mode_pill = "pill-live" if ai_live else "pill-fallback"
+        mode_label = "🟢 Live AI Agents (Claude tool-use loops)" if ai_live else "🟠 Fallback Simulation"
         st.markdown(f"""<span class="status-pill {mode_pill}">{mode_label}</span>""", unsafe_allow_html=True)
+        if not ai_live and ai_error and ai_error != "No API key configured.":
+            st.caption(f"⚠️ Key is configured but not authenticating: {ai_error}")
         st.write("")
         st.write(
             "**Pass 1 (Strategic):** evaluates the Tathya Matrix and the Mayor's "
@@ -2570,13 +2600,20 @@ def main():
     st.sidebar.caption("Multi-agent AI civic-budget platform — Nagarain Municipality")
     st.sidebar.markdown("---")
 
-    ai_pill = "🟢 Live AI Backend" if AI_LIVE else "🟠 Fallback Simulation Mode"
+    ai_live, ai_error = verify_ai_live()
+    ai_pill = "🟢 Live AI Backend" if ai_live else "🟠 Fallback Simulation Mode"
     st.sidebar.markdown(f"**AI Status:** {ai_pill}")
-    if not AI_LIVE:
-        st.sidebar.caption(
-            "Set ANTHROPIC_API_KEY (env var or .streamlit/secrets.toml) to enable "
-            "the live Ingestion, Allocation, and Auditor agents."
-        )
+    if not ai_live:
+        if ai_error and ai_error != "No API key configured.":
+            st.sidebar.caption(f"⚠️ Key present but not authenticating: {ai_error}")
+        else:
+            st.sidebar.caption(
+                "Set ANTHROPIC_API_KEY (env var or .streamlit/secrets.toml) to enable "
+                "the live Ingestion, Allocation, and Auditor agents."
+            )
+        if st.sidebar.button("🔄 Re-check AI Connection"):
+            verify_ai_live(force=True)
+            st.rerun()
     st.sidebar.caption(
         "Hazard data: Open-Meteo (free, keyless) — always live regardless of "
         "the Anthropic API status above."
