@@ -48,6 +48,7 @@ import json
 import os
 import random
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
@@ -411,6 +412,27 @@ def get_client():
 AI_LIVE = get_client() is not None
 
 
+def create_with_retry(client, retries=1, backoff_seconds=1.5, **kwargs):
+    """
+    Thin wrapper around client.messages.create() that retries once on any
+    transient failure (network blip, rate limit, brief API hiccup) before
+    the caller gives up and drops to fallback simulation mode. This exists
+    specifically so a single flaky network moment during a LIVE demo/pitch
+    doesn't visibly trip fallback mode on screen in front of judges — the
+    fallback path itself stays exactly as honest as before if every retry
+    is exhausted.
+    """
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            return client.messages.create(**kwargs)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(backoff_seconds)
+    raise last_exc
+
+
 # --------------------------------------------------------------------------
 # SQLITE PERSISTENCE
 # --------------------------------------------------------------------------
@@ -750,7 +772,8 @@ def ai_classify_complaint(text, selected_sector, selected_language):
         return _fallback_classification(text), "fallback"
 
     try:
-        response = client.messages.create(
+        response = create_with_retry(
+            client, retries=1,
             model=MODEL_NAME,
             max_tokens=500,
             tools=[INGESTION_TOOL],
@@ -821,7 +844,8 @@ def ai_extract_memo_from_image(image_bytes, media_type):
         return None
     try:
         b64 = base64.b64encode(image_bytes).decode("ascii")
-        response = client.messages.create(
+        response = create_with_retry(
+            client, retries=1,
             model=MODEL_NAME,
             max_tokens=600,
             tools=[MEMO_OCR_TOOL],
@@ -964,7 +988,8 @@ def run_strategic_pass():
     try:
         while turn < max_turns:
             turn += 1
-            response = client.messages.create(
+            response = create_with_retry(
+            client, retries=1,
                 model=MODEL_NAME,
                 max_tokens=1200,
                 system=system_prompt,
@@ -1136,15 +1161,20 @@ TACTICAL_TOOLS = [
 ]
 
 
-def run_tactical_pass():
+def run_tactical_pass(strategic_projects=None):
     """
-    Pass 2. Controls ONLY the 40% Citizen Redressal Fund. Same agentic
-    tool-use loop as before, but scoped strictly to the Redressal Fund pool
-    and tagged accordingly. Returns (source, projects, trace_lines, log_lines).
+    Pass 2. Controls ONLY the 40% Citizen Redressal Fund. Runs AFTER Pass 1
+    and is handed Pass 1's completed strategic projects as context — this is
+    the real agent-to-agent handoff: Tactical doesn't just run blind, it
+    reasons about what Strategic already committed to (e.g. avoiding a
+    redundant small water project in a ward where Strategic just funded a
+    major hospital that already includes water infrastructure). Returns
+    (source, projects, trace_lines, log_lines).
     """
+    strategic_projects = strategic_projects or []
     client = get_client()
     if client is None:
-        return run_fallback_tactical_pass()
+        return run_fallback_tactical_pass(strategic_projects)
 
     complaints_by_id = {c["id"]: c for c in st.session_state.complaints}
     open_complaints = [c for c in st.session_state.complaints if c["override_include"] == "Yes"]
@@ -1180,31 +1210,47 @@ def run_tactical_pass():
     demand_summary_text, _ = citizen_demand_summary()
     geo_summary_text, hazard_is_live = ward_profile_summary()
 
+    strategic_summary_text = "\n".join(
+        f"- \"{p['project_name']}\" ({p['sector']}) — {fmt_npr(p['amount'])} — {p['justification'][:160]}"
+        for p in strategic_projects
+    ) or "(Pass 1 funded no strategic projects this cycle)"
+
     system_prompt = (
         "You are Pass 2 (Tactical) of the Context-Aware Allocation Agent for "
         "Nagarain Municipality, Dhanusa, Madhesh Province, Nepal. You control "
         "ONLY the 40% Citizen Redressal Fund — dedicated entirely to solving "
         "complaints, ward requests, and Tole feedback collected via the "
-        "public portal. Macro/statutory projects were already handled by "
-        "Pass 1 using a separate fund; you never touch that money. Use the "
-        "tools provided: check get_remaining_budget before large decisions, "
-        "call fund_project or defer_complaint for EVERY open complaint "
-        "exactly once, and call finish_allocation when done. Never propose "
-        "an amount larger than the remaining budget.\n\n"
-        "Ground every funding decision in THREE things, and name which ones "
+        "public portal.\n\n"
+        "Pass 1 (Strategic) already ran and is handed to you below as "
+        "completed context, not something you can spend from — you never "
+        "touch that fund. Read what Pass 1 already committed to BEFORE "
+        "deciding: if a citizen complaint is already substantially addressed "
+        "by a strategic project Pass 1 funded (e.g. a ward's water-supply "
+        "complaint overlaps with a hospital project that includes its own "
+        "water infrastructure), say so explicitly in your justification and "
+        "either defer it or fund only the gap Pass 1 didn't cover — don't "
+        "double-fund the same underlying need from both pools. Use the tools "
+        "provided: check get_remaining_budget before large decisions, call "
+        "fund_project or defer_complaint for EVERY open complaint exactly "
+        "once, and call finish_allocation when done. Never propose an amount "
+        "larger than the remaining budget.\n\n"
+        "Ground every funding decision in FOUR things, and name which ones "
         "applied in the justification field:\n"
-        "1. The specific ward's LIVE hazard/flood-risk data below.\n"
-        "2. The aggregate citizen demand signal below — sectors and wards "
+        "1. What Pass 1 (Strategic) already funded — avoid redundancy.\n"
+        "2. The specific ward's LIVE hazard/flood-risk data below.\n"
+        "3. The aggregate citizen demand signal below — sectors and wards "
         "where citizens are collectively asking loudest (higher combined "
         "Severity Score) should be weighted higher.\n"
-        "3. The Mayor's policy directive and any ingested memos.\n"
+        "4. The Mayor's policy directive and any ingested memos.\n"
         "Do not use generic boilerplate language — reference the actual "
-        "hazard numbers and demand figures given to you."
+        "hazard numbers, demand figures, and Pass 1 projects given to you."
     )
 
     user_prompt = (
         f"Citizen Redressal Fund available (40% of Total Revenue Ceiling): "
         f"{fmt_npr(remaining_budget['amount'])}\n\n"
+        f"What Pass 1 (Strategic) Already Funded This Cycle "
+        f"(read this before deciding anything below):\n{strategic_summary_text}\n\n"
         f"Mayor's Policy Directive:\n{st.session_state.policy_directive}\n\n"
         f"Ward Geographic / Hazard Profiles "
         f"({'LIVE Open-Meteo data' if hazard_is_live else 'fallback baseline — live API unavailable'}):\n"
@@ -1223,7 +1269,8 @@ def run_tactical_pass():
     try:
         while turn < max_turns:
             turn += 1
-            response = client.messages.create(
+            response = create_with_retry(
+            client, retries=1,
                 model=MODEL_NAME,
                 max_tokens=1500,
                 system=system_prompt,
@@ -1325,14 +1372,19 @@ def run_tactical_pass():
         return "ai", projects, trace, logs
 
     except Exception as exc:
-        fallback_source, fallback_projects, fallback_trace, fallback_logs = run_fallback_tactical_pass()
+        fallback_source, fallback_projects, fallback_trace, fallback_logs = run_fallback_tactical_pass(strategic_projects)
         fallback_trace.insert(0, f"⚠️ Live AI Tactical Pass failed ({exc}) — falling back to simulation.")
         return fallback_source, fallback_projects, fallback_trace, fallback_logs
 
 
-def run_fallback_tactical_pass():
+def run_fallback_tactical_pass(strategic_projects=None):
     """Deterministic simulation used when no API key is configured or the
-    live call fails. Clearly logged as fallback mode — never presented as AI."""
+    live call fails. Clearly logged as fallback mode — never presented as AI.
+    Still reflects the Pass 1 -> Pass 2 handoff: a complaint is skipped if a
+    strategic project already covers the same ward+sector combination."""
+    strategic_projects = strategic_projects or []
+    covered_ward_sectors = {(p["ward"], p["sector"]) for p in strategic_projects}
+
     projects = []
     logs = []
     trace = ["⚠️ FALLBACK MODE — no live AI backend; Tactical Pass using seeded simulation logic."]
@@ -1354,6 +1406,18 @@ def run_fallback_tactical_pass():
             c["ai_reason"] = reason
             logs.append(f"[ALERT] {c['id']} status -> Budget Concluded — REJECTED (manual override)")
             trace.append(f"⏸️ [fallback-TACTICAL] excluded {c['id']} (manual override)")
+            continue
+
+        if (c["ward"], c["sector"]) in covered_ward_sectors:
+            c["status"] = "Budget Concluded"
+            c["funded"] = False
+            c["ai_reason"] = (
+                f"[Fallback] Deferred — Pass 1 (Strategic) already funded a "
+                f"{c['sector']} project in {c['ward']} this cycle; avoiding "
+                f"redundant spend from the Citizen Redressal Fund."
+            )
+            logs.append(f"[ALERT] {c['id']} status -> Budget Concluded — DEFERRED (covered by Strategic Pass)")
+            trace.append(f"⏸️ [fallback-TACTICAL] defer {c['id']} — already covered by Pass 1 in {c['ward']}")
             continue
 
         proposed_amount = random.randint(500_000, 3_200_000)
@@ -1396,13 +1460,15 @@ def run_fallback_tactical_pass():
 
 def run_two_pass_allocation_engine():
     """
-    Orchestrator: runs the Strategic Pass (60% fund) then the Tactical Pass
-    (40% fund), combines their outputs into st.session_state.projects
-    (each row tagged with a 'pool'), and merges their traces/logs. Returns
-    a dict summarizing what ran for the UI to report back.
+    Orchestrator: runs the Strategic Pass (60% fund) first, then hands its
+    completed output to the Tactical Pass (40% fund) as real context — this
+    is the actual agent-to-agent collaboration: Pass 2 reasons about what
+    Pass 1 already decided before making its own decisions. Combines both
+    outputs into st.session_state.projects (each row tagged with a 'pool'),
+    and merges their traces/logs. Returns a dict summarizing what ran.
     """
     strategic_source, strategic_projects, strategic_trace, strategic_logs = run_strategic_pass()
-    tactical_source, tactical_projects, tactical_trace, tactical_logs = run_tactical_pass()
+    tactical_source, tactical_projects, tactical_trace, tactical_logs = run_tactical_pass(strategic_projects)
 
     st.session_state.projects = strategic_projects + tactical_projects
     st.session_state.logs.extend(strategic_logs + tactical_logs)
@@ -1414,6 +1480,7 @@ def run_two_pass_allocation_engine():
         "strategic_count": len(strategic_projects),
         "tactical_count": len(tactical_projects),
     }
+
 
 
 
@@ -1473,7 +1540,8 @@ def run_fairness_audit():
         return run_fallback_fairness_audit()
 
     try:
-        response = client.messages.create(
+        response = create_with_retry(
+            client, retries=1,
             model=MODEL_NAME,
             max_tokens=1200,
             tools=[FAIRNESS_TOOL],
