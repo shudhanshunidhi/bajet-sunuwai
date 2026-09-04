@@ -634,6 +634,20 @@ def init_session_state():
         st.session_state.hazard_cache = {}
 
 
+def reset_to_default_state():
+    """
+    Wipes all complaints, projects, logs, financials, and Tathya Matrix
+    values back to the seeded 5-complaint demo starting point, and persists
+    that reset to SQLite. Does NOT log the admin out or touch the
+    ANTHROPIC_API_KEY / ADMIN_PASSWORD secrets — only the demo's data state.
+    """
+    fresh = default_state()
+    for key, value in fresh.items():
+        st.session_state[key] = value
+    st.session_state.hazard_cache = {}
+    save_state()
+
+
 def next_complaint_id():
     cid = f"CMP-{st.session_state.next_complaint_num}"
     st.session_state.next_complaint_num += 1
@@ -1924,6 +1938,18 @@ def render_admin_portal():
     with top_col2:
         if st.button("🔒 Log Out"):
             st.session_state.admin_authenticated = False
+            st.rerun()
+
+    with st.expander("🧨 Reset Demo Data (start over)", expanded=False):
+        st.caption(
+            "Wipes all complaints, allocations, audit findings, and financial "
+            "inputs back to the seeded 5-complaint starting point. Does not "
+            "log you out or touch your API key / admin password."
+        )
+        confirm_reset = st.checkbox("Yes, I understand this deletes all current demo data.")
+        if st.button("🔄 Reset Everything to Default", disabled=not confirm_reset):
+            reset_to_default_state()
+            st.session_state.flash_success = "🔄 Demo data reset to the default starting state."
             st.rerun()
 
     # Show a flash message left over from a previous rerun (e.g. after
